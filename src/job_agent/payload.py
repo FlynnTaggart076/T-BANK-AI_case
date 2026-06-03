@@ -37,8 +37,13 @@ def vacancy_to_payload(
 ) -> dict[str, Any]:
     vacancy = item.vacancy
     explanation = explanations.get(vacancy.external_id)
-    concerns = explanation.concerns if explanation else item.concerns
-    matched = explanation.matched_requirements if explanation else item.matched
+    concerns = ensure_text_list(explanation.concerns) if explanation else item.concerns
+    matched = ensure_text_list(explanation.matched_requirements) if explanation else item.matched
+    next_step = (
+        sanitize_next_step(explanation.next_step)
+        if explanation
+        else "Открыть вакансию, проверить требования и подготовить короткий отклик."
+    )
 
     return {
         "title": vacancy.title,
@@ -48,12 +53,10 @@ def vacancy_to_payload(
         "score": round(item.score),
         "why": format_matched(matched),
         "concern": format_concerns(concerns),
-        "next": (
-            explanation.next_step
-            if explanation
-            else "Открыть вакансию, проверить требования и подготовить короткий отклик."
-        ),
+        "next": next_step,
         "link": vacancy.url,
+        "source": vacancy.source,
+        "source_label": source_label(vacancy.source),
     }
 
 
@@ -90,6 +93,34 @@ def format_concerns(items: list[str]) -> str:
     return ", ".join(labels[:5]) + "."
 
 
+def ensure_text_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def sanitize_next_step(value: Any) -> str:
+    text = str(value or "").strip()
+    normalized = text.casefold()
+    bad_markers = [
+        "не рассматривать",
+        "не откликаться",
+        "не подавать",
+        "не подавайте",
+        "искать другие вакансии",
+        "рассмотреть другие вакансии",
+        "пропустить вакансию",
+        "отказаться",
+    ]
+    if not text or any(marker in normalized for marker in bad_markers):
+        return "Открыть вакансию, проверить требования и зарплату, затем решить по отклику."
+    return text
+
+
 def humanize_token(value: Any) -> str:
     text = str(value).strip()
     if not text:
@@ -102,6 +133,7 @@ def humanize_token(value: Any) -> str:
         "level:": "",
         "city:": "город ",
         "format:": "",
+        "fresh:7d": "свежая вакансия",
         "fresh:": "свежая вакансия",
         "stop-word:": "стоп-слово: ",
         "hard-mismatch:seniority:": "не junior-уровень: ",

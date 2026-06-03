@@ -8,19 +8,19 @@
 Токен читается из переменной окружения `TELEGRAM_BOT_TOKEN` или из `.env`.
 
 ```bash
-python3 telegram_bot/bot.py
+py telegram_bot/bot.py
 ```
 
 Альтернативный env-файл можно передать так:
 
 ```bash
-python3 telegram_bot/bot.py --env-file /path/to/.env
+py telegram_bot/bot.py --env-file /path/to/.env
 ```
 
 ## Проверка без Telegram
 
 ```bash
-python3 telegram_bot/bot.py --dry-run "Ищу junior позицию продуктового аналитика в Москве без опыта" --top 5
+py telegram_bot/bot.py --dry-run "Ищу junior позицию продуктового аналитика в Москве без опыта" --top 5
 ```
 
 ## Команды

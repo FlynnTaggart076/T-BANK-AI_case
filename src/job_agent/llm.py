@@ -155,8 +155,8 @@ def explain_top(
             explanation = VacancyExplanation(
                 external_id=str(item.get("external_id", "")),
                 suitability=str(item.get("suitability", "")),
-                matched_requirements=list(item.get("matched_requirements", [])),
-                concerns=list(item.get("concerns", [])),
+                matched_requirements=normalize_llm_list(item.get("matched_requirements")),
+                concerns=normalize_llm_list(item.get("concerns")),
                 next_step=str(item.get("next_step", "")),
                 priority=str(item.get("priority", "")),
             )
@@ -167,6 +167,16 @@ def explain_top(
 
     fallback.update(explanations)
     return fallback, [trace]
+
+
+def normalize_llm_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
 
 
 def heuristic_criteria(user_query: str) -> Criteria:

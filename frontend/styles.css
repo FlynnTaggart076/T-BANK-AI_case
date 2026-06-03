@@ -644,9 +644,30 @@ textarea:focus {
 
 .vacancy-card__top {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 76px;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, max-content);
   gap: 18px;
   align-items: start;
+}
+
+.vacancy-card__badges {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 5px 9px;
+  color: var(--sky);
+  background: #e6f4fb;
+  border: 1px solid #cde8f5;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
 }
 
 .vacancy-card h3 {
@@ -839,5 +860,9 @@ textarea:focus {
 
   .score-badge {
     width: 86px;
+  }
+
+  .vacancy-card__badges {
+    justify-items: start;
   }
 }

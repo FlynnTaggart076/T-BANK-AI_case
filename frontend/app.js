@@ -188,7 +188,7 @@ function renderHeroSummary(criteria = {}, vacancies = []) {
   updateSignalBars(vacancies);
 }
 
-function renderVacancies(vacancies, requestedTop) {
+function renderVacancies(vacancies, requestedTop, sourceLabel) {
   vacancyList.innerHTML = "";
 
   vacancies.forEach((vacancy) => {
@@ -198,6 +198,8 @@ function renderVacancies(vacancies, requestedTop) {
     card.querySelector('[data-field="location"]').textContent = vacancy.location;
     card.querySelector('[data-field="salary"]').textContent = vacancy.salary;
     card.querySelector('[data-field="score"]').textContent = vacancy.score;
+    card.querySelector('[data-field="source"]').textContent =
+      vacancy.source_label || sourceLabel || getSelectedSourceLabel();
     card.querySelector('[data-field="why"]').textContent = vacancy.why;
     card.querySelector('[data-field="concern"]').textContent = vacancy.concern;
     card.querySelector('[data-field="next"]').textContent = vacancy.next;
@@ -206,7 +208,8 @@ function renderVacancies(vacancies, requestedTop) {
   });
 
   if (resultCount) {
-    resultCount.textContent = `${vacancies.length} из ${requestedTop} показано`;
+    const label = sourceLabel || getSelectedSourceLabel();
+    resultCount.textContent = `${vacancies.length} из ${requestedTop} показано · ${label}`;
   }
 }
 
@@ -282,7 +285,7 @@ async function runMockSearch(query) {
 
     renderBackendTrace(payload.trace);
     renderCriteria(payload.criteria || {});
-    renderVacancies(payload.vacancies || [], payload.top_n || topN);
+    renderVacancies(payload.vacancies || [], payload.top_n || topN, payload.source_label);
     renderHeroSummary(payload.criteria || {}, payload.vacancies || []);
 
     criteriaPanel.hidden = false;
@@ -293,7 +296,7 @@ async function runMockSearch(query) {
     setButtonLoading(false);
     showError(
       "Backend недоступен",
-      `${error.message} Запустите сервер командой: python3 server.py`,
+      `${error.message} Запустите сервер командой: py server.py`,
     );
   }
 }
