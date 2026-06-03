@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Junior Scout AI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <svg class="svg-sprite" aria-hidden="true">
+      <symbol id="icon-search" viewBox="0 0 24 24">
+        <path d="m21 21-4.3-4.3" />
+        <circle cx="11" cy="11" r="7" />
+      </symbol>
+      <symbol id="icon-link" viewBox="0 0 24 24">
+        <path d="M15 3h6v6" />
+        <path d="M10 14 21 3" />
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      </symbol>
+      <symbol id="icon-briefcase" viewBox="0 0 24 24">
+        <path d="M16 6V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v1" />
+        <path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v11H3Z" />
+        <path d="M3 13h18" />
+        <path d="M9 13v2h6v-2" />
+      </symbol>
+      <symbol id="icon-alert" viewBox="0 0 24 24">
+        <path d="M12 9v4" />
+        <path d="M12 17h.01" />
+        <path d="M10.3 3.8 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0Z" />
+      </symbol>
+    </svg>
+
+    <main class="page-shell">
+      <section class="hero">
+        <div class="hero__content">
+          <header class="topbar" aria-label="Навигация">
+            <a class="brand" href="#">
+              <span class="brand__mark">
+                <svg class="icon" aria-hidden="true">
+                  <use href="#icon-briefcase"></use>
+                </svg>
+              </span>
+              <span>Junior Scout AI</span>
+            </a>
+            <div class="status-pill">
+              <span class="status-pill__dot"></span>
+              Демо-режим
+            </div>
+          </header>
+
+          <div class="intro">
+            <p class="eyebrow">AI-агент для учебного проекта</p>
+            <h1>Поиск junior-вакансий и стажировок по запросу обычным языком</h1>
+            <p class="intro__text">
+              Сервис извлекает критерии из описания кандидата, подбирает релевантные вакансии и показывает,
+              почему каждая позиция подходит именно под запрос.
+            </p>
+          </div>
+
+          <form class="search-panel" id="search-form">
+            <label class="field-label" for="query">Запрос</label>
+            <textarea
+              id="query"
+              name="query"
+              rows="5"
+              placeholder="Ищу junior-вакансию аналитика данных, можно удаленно или в Москве, знаю Python, SQL и Excel"
+            ></textarea>
+            <div class="source-control" aria-label="Инструментарий поиска">
+              <span class="source-control__label">Источник</span>
+              <div class="source-options">
+                <label>
+                  <input type="radio" name="source" value="trudvsem" checked />
+                  <span>Работа России</span>
+                </label>
+                <label>
+                  <input type="radio" name="source" value="superjob" />
+                  <span>SuperJob</span>
+                </label>
+                <label>
+                  <input type="radio" name="source" value="all" />
+                  <span>Оба</span>
+                </label>
+              </div>
+            </div>
+            <div class="search-panel__footer">
+              <p class="hint">Роль, навыки, город, формат работы, ожидания по зарплате.</p>
+              <button class="primary-button" id="search-button" type="submit">
+                <svg class="icon" aria-hidden="true">
+                  <use href="#icon-search"></use>
+                </svg>
+                <span>Найти вакансии</span>
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <aside class="hero-card" aria-label="Краткая аналитика результата">
+          <div class="agent-visual">
+            <div class="agent-visual__header">
+              <span>Fit score</span>
+              <strong id="hero-fit-score">0%</strong>
+            </div>
+            <div class="signal-grid">
+              <span style="--height: 62%"></span>
+              <span style="--height: 88%"></span>
+              <span style="--height: 54%"></span>
+              <span style="--height: 76%"></span>
+              <span style="--height: 93%"></span>
+              <span style="--height: 67%"></span>
+              <span style="--height: 82%"></span>
+            </div>
+            <div class="agent-visual__footer" id="hero-skill-row">
+              <span>Роль</span>
+              <span>Навыки</span>
+              <span>Формат</span>
+            </div>
+          </div>
+          <div class="mini-list">
+            <div>
+              <span class="mini-list__label">Роль</span>
+              <strong id="hero-role">Не выбрана</strong>
+            </div>
+            <div>
+              <span class="mini-list__label">Формат</span>
+              <strong id="hero-format">Не указан</strong>
+            </div>
+            <div class="top-control">
+              <div class="top-control__head">
+                <span class="mini-list__label">Топ</span>
+                <strong><span id="top-value">5</span> вакансий</strong>
+              </div>
+              <input
+                id="top-slider"
+                type="range"
+                min="1"
+                max="25"
+                step="1"
+                value="5"
+                aria-label="Количество вакансий в топе"
+              />
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="workspace" aria-live="polite">
+        <section class="trace-panel" aria-labelledby="trace-title">
+          <div class="section-heading">
+            <p class="eyebrow">Trace</p>
+            <h2 id="trace-title">Лог работы</h2>
+          </div>
+          <ol class="trace-list" id="trace-list">
+            <li data-step="accepted">
+              <span class="trace-list__marker"></span>
+              <div>
+                <strong>Запрос ожидается</strong>
+                <p>Агент готов принять описание кандидата.</p>
+              </div>
+            </li>
+            <li data-step="criteria">
+              <span class="trace-list__marker"></span>
+              <div>
+                <strong>Критерии будут извлечены</strong>
+                <p>Роль, уровень, навыки, город, формат и зарплата.</p>
+              </div>
+            </li>
+            <li data-step="vacancies">
+              <span class="trace-list__marker"></span>
+              <div>
+                <strong>Вакансии будут найдены</strong>
+                <p>Выдача появится после запуска поиска.</p>
+              </div>
+            </li>
+            <li data-step="top">
+              <span class="trace-list__marker"></span>
+              <div>
+                <strong>Топ будет сформирован</strong>
+                <p>Карточки отсортируются по score.</p>
+              </div>
+            </li>
+          </ol>
+        </section>
+
+        <section class="content-stack">
+          <section class="loading-panel" id="loading-panel" hidden>
+            <div class="loader" aria-hidden="true"></div>
+            <div>
+              <h2>Идет поиск подходящих вакансий</h2>
+              <p>AI-агент анализирует запрос, извлекает критерии и готовит выбранный топ.</p>
+            </div>
+          </section>
+
+          <section class="error-panel" id="error-panel" hidden>
+            <div class="error-panel__icon">
+              <svg class="icon" aria-hidden="true">
+                <use href="#icon-alert"></use>
+              </svg>
+            </div>
+            <div>
+              <h2 id="error-title">Вакансии не найдены</h2>
+              <p id="error-message">
+                Попробуйте добавить больше деталей: роль, навыки, город или желаемый формат работы.
+              </p>
+            </div>
+          </section>
+
+          <section class="criteria-panel" id="criteria-panel" hidden aria-labelledby="criteria-title">
+            <div class="section-heading section-heading--row">
+              <div>
+                <p class="eyebrow">Извлеченные критерии</p>
+                <h2 id="criteria-title">Что понял агент</h2>
+              </div>
+              <span class="confidence-badge">уверенность 0.91</span>
+            </div>
+            <dl class="criteria-grid">
+              <div>
+                <dt>Роль</dt>
+                <dd>аналитик данных</dd>
+              </div>
+              <div>
+                <dt>Уровень</dt>
+                <dd>junior / стажировка</dd>
+              </div>
+              <div>
+                <dt>Навыки</dt>
+                <dd class="tag-row">
+                  <span>Python</span>
+                  <span>SQL</span>
+                  <span>Excel</span>
+                </dd>
+              </div>
+              <div>
+                <dt>Город</dt>
+                <dd>Москва</dd>
+              </div>
+              <div>
+                <dt>Удаленка</dt>
+                <dd>да, можно гибрид</dd>
+              </div>
+              <div>
+                <dt>Зарплата</dt>
+                <dd>не указана</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section class="vacancies-panel" id="vacancies-panel" hidden aria-labelledby="vacancies-title">
+            <div class="section-heading section-heading--row">
+              <div>
+                <p class="eyebrow">Топ вакансий</p>
+                <h2 id="vacancies-title">Лучшие совпадения</h2>
+              </div>
+              <span class="result-count">5 найдено</span>
+            </div>
+            <div class="vacancy-list" id="vacancy-list"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <template id="vacancy-card-template">
+      <article class="vacancy-card">
+        <div class="vacancy-card__top">
+          <div>
+            <h3 data-field="title"></h3>
+            <p data-field="company"></p>
+          </div>
+          <div class="score-badge" aria-label="Score">
+            <strong data-field="score"></strong>
+            <span>score</span>
+          </div>
+        </div>
+
+        <div class="vacancy-meta">
+          <span data-field="location"></span>
+          <span data-field="salary"></span>
+        </div>
+
+        <div class="fit-grid">
+          <div class="fit-item fit-item--good">
+            <span>Почему подходит</span>
+            <p data-field="why"></p>
+          </div>
+          <div class="fit-item fit-item--risk">
+            <span>Что смущает</span>
+            <p data-field="concern"></p>
+          </div>
+          <div class="fit-item fit-item--step">
+            <span>Следующий шаг</span>
+            <p data-field="next"></p>
+          </div>
+        </div>
+
+        <a class="vacancy-link" data-field="link" href="#" target="_blank" rel="noreferrer">
+          <span>Открыть вакансию</span>
+          <svg class="icon" aria-hidden="true">
+            <use href="#icon-link"></use>
+          </svg>
+        </a>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>

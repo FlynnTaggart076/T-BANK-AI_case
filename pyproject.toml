@@ -1,0 +1,9 @@
+[project]
+name = "t-bank-vacancy-agent"
+version = "0.1.0"
+description = "MVP agentic pipeline for ranking internship and junior vacancies"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.ruff]
+line-length = 100

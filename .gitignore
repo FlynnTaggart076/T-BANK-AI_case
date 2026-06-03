@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+OpenAI token.txt
+SuperJob token.txt
+Telegram token.txt
+output/report.md
+output/run.log
