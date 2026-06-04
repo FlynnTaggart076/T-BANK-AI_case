@@ -23,7 +23,7 @@ def load_env_file(path: Path | None = None) -> None:
             _ENV_LOADED = True
         return
 
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    for raw_line in env_path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -34,7 +34,7 @@ def load_env_file(path: Path | None = None) -> None:
 
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key or key in os.environ:
+        if not key or os.environ.get(key):
             continue
 
         value = value.strip()

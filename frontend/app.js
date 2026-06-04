@@ -285,8 +285,19 @@ async function runMockSearch(query) {
 
     renderBackendTrace(payload.trace);
     renderCriteria(payload.criteria || {});
-    renderVacancies(payload.vacancies || [], payload.top_n || topN, payload.source_label);
-    renderHeroSummary(payload.criteria || {}, payload.vacancies || []);
+
+    const vacancies = payload.vacancies || [];
+    if (!vacancies.length) {
+      showError(
+        "Вакансии не найдены",
+        "По этому запросу строгий фильтр не нашел подходящих вакансий. Попробуйте другой источник, соседний город или более широкую формулировку роли.",
+        payload.trace || [],
+      );
+      return;
+    }
+
+    renderVacancies(vacancies, payload.top_n || topN, payload.source_label);
+    renderHeroSummary(payload.criteria || {}, vacancies);
 
     criteriaPanel.hidden = false;
     vacanciesPanel.hidden = false;

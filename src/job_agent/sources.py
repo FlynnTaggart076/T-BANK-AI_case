@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Criteria, Vacancy
-from .utils import clean_text, load_env_file, parse_date
+from .utils import ROOT, clean_text, load_env_file, parse_date
 
 
 MOSCOW_REGION_CODE = "7700000000000"

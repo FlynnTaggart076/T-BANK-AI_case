@@ -23,7 +23,7 @@ class VacancyAgentPipeline:
         superjob_source: SuperJobSource | None = None,
         local_source: LocalFileSource | None = None,
         llm: LLMClient | None = None,
-        use_local_fallback: bool = True,
+        use_local_fallback: bool = False,
     ) -> None:
         self.trudvsem_source = trudvsem_source or TrudvsemSource()
         self.superjob_source = superjob_source or SuperJobSource()

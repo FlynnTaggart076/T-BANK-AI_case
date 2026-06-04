@@ -27,21 +27,59 @@ LEVEL_TERMS = {
     "до года",
 }
 
-PRODUCT_ANALYST_ROLES = [
-    "продуктовый аналитик",
-    "аналитик продукта",
-    "product analyst",
-]
+GENERIC_ROLE_TERMS = {
+    "junior",
+    "джуниор",
+    "стажер",
+    "стажёр",
+    "стажировка",
+    "intern",
+    "internship",
+}
 
-PRODUCT_ANALYST_NICE_SKILLS = [
-    "sql",
-    "python",
-    "excel",
-    "метрики",
-    "a/b",
-    "ab-тест",
-    "дашборд",
-]
+ROLE_FILLER_WORDS = {
+    "ищу",
+    "ищем",
+    "найти",
+    "нужна",
+    "нужен",
+    "нужно",
+    "вакансию",
+    "вакансия",
+    "работу",
+    "работа",
+    "позицию",
+    "должность",
+    "без",
+    "опыта",
+    "работы",
+    "город",
+    "в",
+    "во",
+    "на",
+    "и",
+    "или",
+    "можно",
+    "удаленно",
+    "удалённо",
+    "remote",
+    "руб",
+    "рублей",
+    "зарплата",
+    "от",
+    "до",
+    "знаю",
+    "умею",
+    "навыки",
+    "требования",
+    "junior",
+    "джуниор",
+    "стажер",
+    "стажёр",
+    "стажировка",
+    "intern",
+    "internship",
+}
 
 
 class LLMClient:
@@ -108,9 +146,17 @@ def extract_criteria(user_query: str, llm: LLMClient) -> tuple[Criteria, list[st
     fallback = heuristic_criteria(user_query)
     system = (
         "Ты извлекаешь критерии поиска вакансий из свободного запроса кандидата. "
-        "Верни только JSON-объект с ключами: role_keywords, skill_keywords, cities, "
-        "remote, levels, min_salary, max_age_days, stop_words, must_have, nice_to_have. "
-        "remote должен быть true, false или null. min_salary может быть null."
+        "Профессия может быть любой: IT, производство, медицина, сервис, офис, рабочие специальности. "
+        "Не используй закрытый список профессий и не подменяй профессию общими словами вроде junior или стажер. "
+        "Верни только JSON-объект с ключами: role_keywords, skill_keywords, cities, remote, levels, "
+        "min_salary, max_age_days, stop_words, must_have, nice_to_have. "
+        "role_keywords: конкретная профессия или должность из запроса в нормальной форме, без города, уровня, зарплаты "
+        "и слов вакансии/работа/позиция. Например: 'Швея без опыта город Москва' -> ['швея']; "
+        "'Ищу junior аналитика данных в Москве, знаю SQL' -> ['аналитик данных']. "
+        "cities: города или регионы в нормальной форме, например ['Москва']; не добавляй город в role_keywords. "
+        "levels: junior/стажер/без опыта/до года и похожие ограничения по опыту. "
+        "skill_keywords, must_have и nice_to_have заполняй только навыками, явно указанными в запросе. "
+        "remote должен быть true, false или null. min_salary может быть null. max_age_days по умолчанию 45."
     )
     payload, trace = llm.chat_json(system=system, user=user_query, fallback=asdict(fallback))
     criteria = criteria_from_dict(user_query, payload)
@@ -204,23 +250,9 @@ def heuristic_criteria(user_query: str) -> Criteria:
             "ml",
         ],
     )
-    roles = _find_keywords(
-        text,
-        [
-            "продуктовый аналитик",
-            "аналитик продукта",
-            "product analyst",
-            "backend",
-            "python backend",
-            "разработчик",
-            "аналитик",
-            "data analyst",
-            "qa",
-            "тестировщик",
-        ],
-    )
-    cities = _find_keywords(text, ["москва", "санкт-петербург", "спб"])
-    levels = _find_keywords(text, ["стажер", "стажёр", "junior", "джуниор", "без опыта"])
+    roles = infer_role_keywords(user_query)
+    cities = infer_city_keywords(user_query)
+    levels = infer_level_keywords(text)
     remote = None
     if any(word in text for word in ["удален", "удалён", "remote", "дистанц"]):
         remote = True
@@ -267,7 +299,6 @@ def criteria_from_dict(raw_query: str, data: Any) -> Criteria:
 
 
 def normalize_criteria(criteria: Criteria) -> Criteria:
-    raw = criteria.raw_query.casefold()
     roles: list[str] = []
     levels = list(criteria.levels)
     skill_keywords, extra_levels = split_level_terms(criteria.skill_keywords)
@@ -280,12 +311,13 @@ def normalize_criteria(criteria: Criteria) -> Criteria:
         if is_level_term(normalized):
             levels.append(role)
         else:
-            roles.append(role)
+            cleaned_role = clean_role_keyword(role)
+            if cleaned_role:
+                roles.append(cleaned_role)
 
-    if is_product_analyst_intent(raw, roles):
-        roles = merge_unique(PRODUCT_ANALYST_ROLES + roles)
-        if not skill_keywords and not must_have:
-            nice_to_have = merge_unique(nice_to_have + PRODUCT_ANALYST_NICE_SKILLS)
+    inferred_roles = infer_role_keywords(criteria.raw_query)
+    if inferred_roles and (not roles or not has_specific_role(roles)):
+        roles = merge_unique(inferred_roles + roles)
 
     if not roles:
         roles = ["стажер", "junior"]
@@ -299,15 +331,83 @@ def normalize_criteria(criteria: Criteria) -> Criteria:
     return criteria
 
 
-def is_product_analyst_intent(raw_query: str, roles: list[str]) -> bool:
-    role_text = " ".join(roles).casefold()
-    text = f"{raw_query} {role_text}"
-    return (
-        "продукт" in text
-        and "аналит" in text
-        or "product analyst" in text
-        or "аналитик продукта" in text
-    )
+def infer_role_keywords(user_query: str) -> list[str]:
+    text = strip_non_role_fragments(user_query).casefold()
+    tokens = [normalize_role_token(token) for token in re.findall(r"[a-zа-яё+#-]+", text, flags=re.IGNORECASE)]
+    role_tokens = [
+        token
+        for token in tokens
+        if token and token not in ROLE_FILLER_WORDS and not is_level_term(token)
+    ]
+    if not role_tokens:
+        return []
+
+    return [" ".join(role_tokens[:3])]
+
+
+def clean_role_keyword(value: Any) -> str:
+    text = strip_non_role_fragments(str(value or "")).casefold()
+    tokens = [normalize_role_token(token) for token in re.findall(r"[a-zа-яё+#-]+", text, flags=re.IGNORECASE)]
+    role_tokens = [
+        token
+        for token in tokens
+        if token and token not in ROLE_FILLER_WORDS and not is_level_term(token)
+    ]
+    return " ".join(role_tokens).strip()
+
+
+def has_specific_role(roles: list[str]) -> bool:
+    return any(role.casefold().strip() not in GENERIC_ROLE_TERMS for role in roles)
+
+
+def normalize_role_token(value: str) -> str:
+    return value.strip("-_ ")
+
+
+def infer_city_keywords(user_query: str) -> list[str]:
+    patterns = [
+        r"\b(?:город|г\.?)\s+([a-zа-яё-]+(?:\s+[a-zа-яё-]+){0,2})",
+        r"\b(?:в|во)\s+([А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2})",
+    ]
+    cities: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, user_query, flags=re.IGNORECASE):
+            city = clean_city_keyword(match.group(1))
+            if city:
+                cities.append(city)
+    return merge_unique(cities)
+
+
+def infer_level_keywords(text: str) -> list[str]:
+    result: list[str] = []
+    if "без опыта" in text:
+        result.append("без опыта")
+    if "до года" in text:
+        result.append("до года")
+    for term in LEVEL_TERMS:
+        if term in text:
+            result.append(term)
+    return merge_unique(result)
+
+
+def strip_non_role_fragments(text: str) -> str:
+    text = re.sub(r"\b(?:город|г\.?)\s+[a-zа-яё-]+(?:\s+[a-zа-яё-]+){0,2}", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:в|во)\s+[А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2}", " ", text)
+    text = re.sub(r"\b(?:знаю|умею|навыки|стек|технологии)\b.*", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:без опыта|без опыта работы|до года|junior|джуниор|стаж[её]р|стажировка|intern(?:ship)?|remote)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:удал[её]нн?о|дистанционно|зарплата|оклад|от|до)\b\s*\d*[\s\d]*(?:к|k|тыс|000|руб(?:лей)?)?", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d+[\s\d]*(?:к|k|тыс|000|руб(?:лей)?)?\b", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_city_keyword(value: str) -> str:
+    text = re.split(
+        r"\b(?:без|знаю|умею|навыки|зарплата|оклад|от|до|можно|удал[её]нн?о|remote|junior|стаж[её]р)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return re.sub(r"\s+", " ", text).strip(" ,.;:-")
 
 
 def fallback_explanations(top: list[ScoredVacancy]) -> dict[str, VacancyExplanation]:
