@@ -54,11 +54,42 @@ SENIORITY_MARKERS = [
     "руководитель",
 ]
 
+MATCH_FILLER_WORDS = {
+    "ищу",
+    "ищем",
+    "найти",
+    "нужна",
+    "нужен",
+    "нужно",
+    "вакансию",
+    "вакансия",
+    "работу",
+    "работа",
+    "позицию",
+    "должность",
+    "город",
+    "в",
+    "во",
+    "на",
+    "по",
+    "для",
+    "с",
+    "со",
+    "без",
+    "опыта",
+    "работы",
+    "можно",
+    "удаленно",
+    "удалённо",
+    "remote",
+}
+
 
 def validate_and_dedupe(vacancies: list[Vacancy]) -> tuple[list[Vacancy], list[str]]:
     trace: list[str] = []
     valid: list[Vacancy] = []
     seen: set[str] = set()
+    seen_fingerprints: set[str] = set()
     broken_count = 0
     duplicate_count = 0
 
@@ -69,12 +100,15 @@ def validate_and_dedupe(vacancies: list[Vacancy]) -> tuple[list[Vacancy], list[s
                 trace.append(f"Drop broken vacancy: id={vacancy.external_id or '<empty>'}")
             continue
         key = vacancy.url.casefold() or f"{vacancy.source}:{vacancy.external_id}"
-        if key in seen:
+        fingerprint = vacancy_fingerprint(vacancy)
+        if key in seen or (fingerprint and fingerprint in seen_fingerprints):
             duplicate_count += 1
             if duplicate_count <= 5:
                 trace.append(f"Drop duplicate vacancy: {vacancy.title} ({vacancy.url})")
             continue
         seen.add(key)
+        if fingerprint:
+            seen_fingerprints.add(fingerprint)
         valid.append(vacancy)
 
     if broken_count > 5:
@@ -92,7 +126,9 @@ def score_vacancies(criteria: Criteria, vacancies: list[Vacancy]) -> list[Scored
 
 
 def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
-    text = vacancy.text.casefold()
+    text = normalize_match_text(vacancy.text)
+    title_text = normalize_match_text(vacancy.title)
+    raw_query_text = normalize_match_text(criteria.raw_query)
     matched: list[str] = []
     concerns: list[str] = []
     score = 0.0
@@ -101,16 +137,32 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
     specific_role_words = _specific_role_words(criteria.role_keywords)
     city_matches: list[str] = []
 
-    role_matches = contains_any(text, criteria.role_keywords)
+    role_matches = contains_any_match(text, criteria.role_keywords)
+    role_title_matches = contains_any_match(title_text, criteria.role_keywords)
     if role_matches:
         score += 30 + min(len(role_matches), 3) * 6
         matched.extend(f"role:{item}" for item in role_matches[:3])
+        if role_title_matches:
+            score += 8
+            matched.append(f"title-role:{role_title_matches[0]}")
     else:
         score -= 30
         concerns.append("роль не совпала явно")
 
-    required_skill_matches = contains_any(text, required_skill_words)
-    nice_skill_matches = contains_any(text, nice_skill_words)
+    title_match = title_query_match(raw_query_text, title_text)
+    if title_match == "exact":
+        score += 28
+        matched.append("title:exact")
+    elif title_match == "tokens":
+        score += 18
+        matched.append("title:tokens")
+
+    if role_matches and not role_title_matches and not title_match:
+        score -= 18
+        concerns.append("роль найдена только в описании, не в названии")
+
+    required_skill_matches = contains_any_match(text, required_skill_words)
+    nice_skill_matches = contains_any_match(text, nice_skill_words)
     if required_skill_words and required_skill_matches:
         score += min(len(required_skill_matches), 6) * 10
         matched.extend(f"skill:{item}" for item in required_skill_matches[:6])
@@ -122,39 +174,41 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
         score += min(len(nice_skill_matches), 5) * 4
         matched.extend(f"nice:{item}" for item in nice_skill_matches[:5])
 
-    level_matches = contains_any(text, criteria.levels + JUNIOR_WORDS)
-    if level_matches:
-        score += 18
-        matched.append(f"level:{level_matches[0]}")
-    else:
-        score -= 8
-        concerns.append("уровень стажер/junior не подтвержден")
+    level_terms = criteria.levels + (JUNIOR_WORDS if wants_junior_or_no_experience(criteria) else [])
+    level_matches = contains_any_match(text, level_terms)
+    if criteria.levels:
+        if level_matches:
+            score += 18
+            matched.append(f"level:{level_matches[0]}")
+        else:
+            score -= 8
+            concerns.append("уровень стажер/junior не подтвержден")
 
     hard_mismatches = experience_reality_check(text, criteria)
     if hard_mismatches:
         score -= 40 + 10 * min(len(hard_mismatches), 3)
         concerns.extend(f"hard-mismatch:{item}" for item in hard_mismatches[:4])
 
-    stop_matches = contains_any(text, criteria.stop_words + DEFAULT_STOP_WORDS)
+    stop_matches = contains_any_match(text, criteria.stop_words + DEFAULT_STOP_WORDS)
     if stop_matches:
         score -= min(len(stop_matches), 4) * 12
         concerns.extend(f"stop-word:{item}" for item in stop_matches[:4])
 
     if criteria.remote is True:
-        remote_matches = contains_any(text, REMOTE_WORDS)
+        remote_matches = contains_any_match(text, REMOTE_WORDS)
         if remote_matches:
             score += 14
             matched.append("format:remote")
         else:
             concerns.append("удаленный формат не подтвержден")
     elif criteria.remote is False and criteria.cities:
-        city_matches = contains_any(text, criteria.cities)
+        city_matches = contains_any_match(text, criteria.cities)
         if city_matches:
             score += 10
             matched.append(f"city:{city_matches[0]}")
         else:
             concerns.append("город не совпал явно")
-    elif criteria.cities and contains_any(text, criteria.cities):
+    elif criteria.cities and contains_any_match(text, criteria.cities):
         score += 8
         matched.append("city")
 
@@ -185,14 +239,15 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
     if vacancy.requirements or vacancy.responsibilities:
         score += 4
 
-    if specific_role_words and not contains_any(text, specific_role_words):
+    has_specific_role_match = contains_any_match(text, specific_role_words)
+    if specific_role_words and not has_specific_role_match and not role_matches:
         concerns.append("нет совпадения с целевой ролью")
 
     filtered_out = (
         score < 10
         or any(c.startswith("stop-word:") for c in concerns)
         or any(c.startswith("hard-mismatch:") for c in concerns)
-        or (bool(specific_role_words) and not contains_any(text, specific_role_words))
+        or (bool(specific_role_words) and not has_specific_role_match and not role_matches)
         or (bool(required_skill_words) and not required_skill_matches)
         or (bool(criteria.levels) and not level_matches and not role_matches)
         or (criteria.remote is False and bool(criteria.cities) and not city_matches)
@@ -204,6 +259,100 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
         concerns=concerns,
         filtered_out=filtered_out,
     )
+
+
+def contains_any_match(text: str, words: list[str]) -> list[str]:
+    normalized_text = normalize_match_text(text)
+    normalized_text_tokens = set(normalized_text.split())
+    soft_text_tokens = {soft_match_token(token) for token in normalized_text_tokens}
+    result: list[str] = []
+    for word in words:
+        normalized_word = normalize_match_text(word)
+        if not normalized_word:
+            continue
+        word_tokens = normalized_word.split()
+        soft_word_tokens = [soft_match_token(token) for token in word_tokens]
+        if normalized_word in normalized_text or (
+            len(word_tokens) > 1 and all(token in normalized_text_tokens for token in word_tokens)
+        ) or (
+            len(soft_word_tokens) > 1 and all(token in soft_text_tokens for token in soft_word_tokens)
+        ):
+            result.append(word)
+    return result
+
+
+def title_query_match(raw_query_text: str, title_text: str) -> str:
+    if not raw_query_text or not title_text:
+        return ""
+    title_tokens = title_text.split()
+    if raw_query_text in title_text or (len(title_tokens) > 1 and title_text in raw_query_text):
+        return "exact"
+
+    query_tokens = [
+        token
+        for token in raw_query_text.split()
+        if token not in MATCH_FILLER_WORDS and len(token) > 2
+    ]
+    soft_title_tokens = {soft_match_token(token) for token in title_text.split()}
+    soft_query_tokens = [soft_match_token(token) for token in query_tokens[:5]]
+    if len(query_tokens) >= 2 and all(token in soft_title_tokens for token in soft_query_tokens):
+        return "tokens"
+    return ""
+
+
+def normalize_match_text(value: str) -> str:
+    text = str(value or "").casefold()
+    text = re.sub(r"[^0-9a-zа-яё+#]+", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def soft_match_token(token: str) -> str:
+    token = token.casefold().strip()
+    if not re.search(r"[а-яё]", token) or len(token) <= 5:
+        return token
+    for ending in (
+        "ыми",
+        "ими",
+        "ого",
+        "его",
+        "ому",
+        "ему",
+        "иях",
+        "ах",
+        "ях",
+        "ой",
+        "ый",
+        "ий",
+        "ая",
+        "ое",
+        "ую",
+        "юю",
+        "ом",
+        "ем",
+        "ым",
+        "им",
+        "ам",
+        "ям",
+        "а",
+        "я",
+        "ы",
+        "и",
+        "у",
+        "ю",
+        "е",
+        "о",
+    ):
+        if token.endswith(ending) and len(token) - len(ending) >= 4:
+            return token[: -len(ending)]
+    return token
+
+
+def vacancy_fingerprint(vacancy: Vacancy) -> str:
+    parts = [
+        normalize_match_text(vacancy.title),
+        normalize_match_text(vacancy.company),
+    ]
+    return "|".join(parts).strip("|")
 
 
 def _unique(values: list[str]) -> list[str]:

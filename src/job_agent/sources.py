@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -247,12 +248,52 @@ class LocalFileSource:
         )
 
 
+SEARCH_PREPOSITIONS = {"в", "во", "на", "по", "для", "с", "со", "к", "у"}
+SEARCH_FILLER_WORDS = {
+    "ищу",
+    "ищем",
+    "найти",
+    "нужна",
+    "нужен",
+    "нужно",
+    "вакансию",
+    "вакансия",
+    "работу",
+    "работа",
+    "позицию",
+    "должность",
+    "город",
+    "без",
+    "опыта",
+    "работы",
+    "junior",
+    "джуниор",
+    "стажер",
+    "стажёр",
+    "стажировка",
+    "intern",
+    "internship",
+    "можно",
+    "удаленно",
+    "удалённо",
+    "remote",
+    "зарплата",
+    "оклад",
+    "от",
+    "до",
+}
+
+
 def build_search_queries(criteria: Criteria) -> list[str]:
-    roles = criteria.role_keywords[:3] or [criteria.raw_query]
+    roles = expand_role_queries(criteria.role_keywords[:3] or [criteria.raw_query])
     skills = unique_values(criteria.skill_keywords + criteria.must_have + criteria.nice_to_have)[:5]
+    raw_variants = raw_query_variants(criteria.raw_query)
+    raw_modifiers = raw_search_modifiers(criteria.raw_query, roles + skills)
     generic_roles = {"стажировка", "стажер", "стажёр", "junior", "intern", "internship"}
     has_specific_role = any(role.casefold().strip() not in generic_roles for role in roles)
     queries: list[str] = []
+
+    queries.extend(raw_variants[:3])
 
     for role in roles:
         normalized_role = role.casefold().strip()
@@ -262,6 +303,10 @@ def build_search_queries(criteria: Criteria) -> list[str]:
             queries.append(" ".join([role, skills[0]]))
             if len(skills) > 1 and normalized_role not in generic_roles:
                 queries.append(" ".join([role, skills[1]]))
+        if raw_modifiers and normalized_role not in generic_roles:
+            queries.append(" ".join([role] + raw_modifiers[:2]))
+            for modifier in raw_modifiers[:2]:
+                queries.append(" ".join([role, modifier]))
         if normalized_role not in generic_roles or not skills:
             queries.append(role)
 
@@ -272,12 +317,76 @@ def build_search_queries(criteria: Criteria) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for query in queries:
-        query = clean_text(query)
+        query = normalize_search_query(query)
         key = query.casefold()
         if query and key not in seen:
             seen.add(key)
             result.append(query)
-    return result[:7]
+    return result[:10]
+
+
+def expand_role_queries(role_keywords: list[str]) -> list[str]:
+    roles: list[str] = []
+    for role in role_keywords:
+        normalized = normalize_search_query(role)
+        if not normalized:
+            continue
+        roles.append(normalized)
+
+        head = re.split(r"\b(?:в|во|на|по|для|с|со|к|у)\b", normalized, maxsplit=1)[0].strip()
+        if head:
+            roles.append(head)
+
+        tokens = normalized.split()
+        meaningful = [token for token in tokens if token not in SEARCH_PREPOSITIONS]
+        if len(meaningful) >= 2:
+            roles.append(" ".join(meaningful[:2]))
+        if meaningful:
+            roles.append(meaningful[0])
+
+    return unique_values(roles)
+
+
+def raw_query_variants(raw_query: str) -> list[str]:
+    normalized = normalize_search_query(raw_query)
+    if not normalized:
+        return []
+
+    tokens = normalized.split()
+    without_fillers = [token for token in tokens if token not in SEARCH_FILLER_WORDS]
+    without_prepositions = [
+        token for token in without_fillers if token not in SEARCH_PREPOSITIONS
+    ]
+    return unique_values(
+        [
+            normalized,
+            " ".join(without_fillers),
+            " ".join(without_prepositions),
+        ]
+    )
+
+
+def raw_search_modifiers(raw_query: str, known_terms: list[str]) -> list[str]:
+    known_tokens = set()
+    for term in known_terms:
+        known_tokens.update(normalize_search_query(term).split())
+
+    modifiers: list[str] = []
+    for token in normalize_search_query(raw_query).split():
+        if (
+            token
+            and token not in known_tokens
+            and token not in SEARCH_FILLER_WORDS
+            and token not in SEARCH_PREPOSITIONS
+        ):
+            modifiers.append(token)
+    return unique_values(modifiers)[:4]
+
+
+def normalize_search_query(value: str) -> str:
+    text = clean_text(value).casefold()
+    text = re.sub(r"[^0-9a-zа-яё+#]+", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def unique_values(values: list[str]) -> list[str]:

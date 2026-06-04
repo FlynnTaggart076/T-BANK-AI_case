@@ -148,12 +148,15 @@ def extract_criteria(user_query: str, llm: LLMClient) -> tuple[Criteria, list[st
         "Ты извлекаешь критерии поиска вакансий из свободного запроса кандидата. "
         "Профессия может быть любой: IT, производство, медицина, сервис, офис, рабочие специальности. "
         "Не используй закрытый список профессий и не подменяй профессию общими словами вроде junior или стажер. "
+        "Если пользователь вставил точное название вакансии, выдели базовую профессию в role_keywords, "
+        "а уточнения из названия оставь для поискового запроса через исходный raw text; не превращай уточнение в город без явного признака города. "
         "Верни только JSON-объект с ключами: role_keywords, skill_keywords, cities, remote, levels, "
         "min_salary, max_age_days, stop_words, must_have, nice_to_have. "
         "role_keywords: конкретная профессия или должность из запроса в нормальной форме, без города, уровня, зарплаты "
         "и слов вакансии/работа/позиция. Например: 'Швея без опыта город Москва' -> ['швея']; "
         "'Ищу junior аналитика данных в Москве, знаю SQL' -> ['аналитик данных']. "
         "cities: города или регионы в нормальной форме, например ['Москва']; не добавляй город в role_keywords. "
+        "Слова в скобках, например '(Север)', '(вахта)' или '(смена)', не считай городом, если рядом нет слов город/г./в/во. "
         "levels: junior/стажер/без опыта/до года и похожие ограничения по опыту. "
         "skill_keywords, must_have и nice_to_have заполняй только навыками, явно указанными в запросе. "
         "remote должен быть true, false или null. min_salary может быть null. max_age_days по умолчанию 45."
@@ -267,7 +270,7 @@ def heuristic_criteria(user_query: str) -> Criteria:
         skill_keywords=skills,
         cities=cities,
         remote=remote,
-        levels=levels or ["стажер", "junior", "без опыта"],
+        levels=levels,
         min_salary=min_salary,
         max_age_days=45,
         stop_words=["senior", "lead", "middle", "ведущий", "руководитель"],
@@ -282,13 +285,16 @@ def criteria_from_dict(raw_query: str, data: Any) -> Criteria:
         return heuristic_criteria(raw_query)
 
     fallback = heuristic_criteria(raw_query)
+    cities = normalize_extracted_cities(raw_query, _list(data.get("cities")) or fallback.cities)
+    levels = _list(data.get("levels")) or fallback.levels
+
     criteria = Criteria(
         raw_query=raw_query,
         role_keywords=_list(data.get("role_keywords")) or fallback.role_keywords,
         skill_keywords=_list(data.get("skill_keywords")) or fallback.skill_keywords,
-        cities=_list(data.get("cities")) or fallback.cities,
+        cities=cities,
         remote=data.get("remote") if isinstance(data.get("remote"), bool) else fallback.remote,
-        levels=_list(data.get("levels")) or fallback.levels,
+        levels=levels,
         min_salary=_optional_int(data.get("min_salary")) or fallback.min_salary,
         max_age_days=_optional_int(data.get("max_age_days")) or fallback.max_age_days,
         stop_words=_list(data.get("stop_words")) or fallback.stop_words,
@@ -408,6 +414,31 @@ def clean_city_keyword(value: str) -> str:
         flags=re.IGNORECASE,
     )[0]
     return re.sub(r"\s+", " ", text).strip(" ,.;:-")
+
+
+def normalize_extracted_cities(raw_query: str, cities: list[str]) -> list[str]:
+    if not cities:
+        return []
+
+    query_without_parentheses = re.sub(r"\([^)]*\)", " ", raw_query)
+    normalized_without_parentheses = query_without_parentheses.casefold()
+    normalized_raw = raw_query.casefold()
+    result: list[str] = []
+
+    for city in cities:
+        normalized_city = city.casefold().strip()
+        if not normalized_city:
+            continue
+
+        city_only_in_parentheses = (
+            normalized_city in normalized_raw
+            and normalized_city not in normalized_without_parentheses
+        )
+        if city_only_in_parentheses:
+            continue
+        result.append(city)
+
+    return merge_unique(result)
 
 
 def fallback_explanations(top: list[ScoredVacancy]) -> dict[str, VacancyExplanation]:
