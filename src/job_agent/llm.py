@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -9,11 +10,19 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .models import Criteria, ScoredVacancy, VacancyExplanation
+from .models import (
+    Criteria,
+    LLMBatchScoreItem,
+    RequirementCheck,
+    ScoredVacancy,
+    Vacancy,
+    VacancyDeepAnalysis,
+    VacancyExplanation,
+)
 from .utils import clamp, load_env_file
 
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.1"
 
 LEVEL_TERMS = {
     "junior",
@@ -59,6 +68,10 @@ ROLE_FILLER_WORDS = {
     "на",
     "и",
     "или",
+    "с",
+    "со",
+    "для",
+    "при",
     "можно",
     "удаленно",
     "удалённо",
@@ -66,12 +79,47 @@ ROLE_FILLER_WORDS = {
     "руб",
     "рублей",
     "зарплата",
+    "зарплатой",
+    "зарплату",
+    "оклад",
     "от",
     "до",
     "знаю",
     "умею",
     "навыки",
     "требования",
+    "опытом",
+    "категории",
+    "категория",
+    "разряда",
+    "разряд",
+    "класса",
+    "класс",
+    # Geographic suffixes that must never become part of a role name
+    "область",
+    "области",
+    "областью",
+    "областной",
+    "край",
+    "края",
+    "крае",
+    "краю",
+    "округ",
+    "округа",
+    "округе",
+    "округу",
+    "район",
+    "района",
+    "районе",
+    "району",
+    "республика",
+    "республики",
+    "республике",
+    "республику",
+    "регион",
+    "региона",
+    "регионе",
+    "региону",
     "junior",
     "джуниор",
     "стажер",
@@ -155,7 +203,12 @@ def extract_criteria(user_query: str, llm: LLMClient) -> tuple[Criteria, list[st
         "role_keywords: конкретная профессия или должность из запроса в нормальной форме, без города, уровня, зарплаты "
         "и слов вакансии/работа/позиция. Например: 'Швея без опыта город Москва' -> ['швея']; "
         "'Ищу junior аналитика данных в Москве, знаю SQL' -> ['аналитик данных']. "
-        "cities: города или регионы в нормальной форме, например ['Москва']; не добавляй город в role_keywords. "
+        "cities: города или регионы в **именительном падеже**, например ['Казань'] (не 'Казани'), "
+        "['Москва'] (не 'Москве'), ['Липецкая область'] (не 'Липецкой области'), "
+        "['Краснодарский край'] (не 'Краснодарском крае'), ['Санкт-Петербург'] (не 'Петербурге'). "
+        "Никогда не добавляй город в role_keywords — даже частью: "
+        "'Инженер-механик в Санкт-Петербурге' → role_keywords: ['инженер-механик'], cities: ['Санкт-Петербург']. "
+        "'Учитель физики в Липецкой области' → role_keywords: ['учитель физики'], cities: ['Липецкая область']. "
         "Слова в скобках, например '(Север)', '(вахта)' или '(смена)', не считай городом, если рядом нет слов город/г./в/во. "
         "levels: junior/стажер/без опыта/до года и похожие ограничения по опыту. "
         "skill_keywords, must_have и nice_to_have заполняй только навыками, явно указанными в запросе. "
@@ -226,6 +279,233 @@ def normalize_llm_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [str(value).strip()]
+
+
+def normalize_llm_list_of_dicts(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def generate_search_filters(
+    criteria: Criteria,
+    llm: LLMClient,
+) -> tuple[list[str], dict[str, Any], list[str]]:
+    """Ask LLM to generate targeted search queries and API filter hints."""
+    if not llm.available:
+        return [], {}, ["LLM search filters skipped: no API key"]
+
+    system = (
+        "Ты формируешь поисковые запросы для API платформ Работа России и SuperJob. "
+        "На основе критериев кандидата сгенерируй 2–4 точных поисковых строки: "
+        "основная роль + синонимы + смежные должности (например, 'аналитик данных' → "
+        "['аналитик данных', 'data analyst', 'BI-аналитик', 'продуктовый аналитик']). "
+        "Строки должны быть короткими (1–3 слова), без города, уровня и зарплаты. "
+        "Верни JSON: {\"queries\": [\"...\", ...], \"api_filters\": {"
+        "\"experience\": \"noExperience|between1And3|between3And6|moreThan6|null\", "
+        "\"employment\": \"full|part|project|volunteer|probation|null\", "
+        "\"schedule\": \"fullDay|shift|flexible|remote|flyInFlyOut|null\"}}. "
+        "api_filters используй только если явно следует из критериев, иначе null."
+    )
+    user = json.dumps(asdict(criteria), ensure_ascii=False)
+    payload, trace_msg = llm.chat_json(system=system, user=user, fallback={"queries": [], "api_filters": {}})
+
+    queries = _list(payload.get("queries")) if isinstance(payload, dict) else []
+    api_filters = payload.get("api_filters") if isinstance(payload, dict) else {}
+    if not isinstance(api_filters, dict):
+        api_filters = {}
+
+    return queries[:6], api_filters, [f"Search filters: {trace_msg}, generated_queries={queries[:4]}"]
+
+
+def llm_batch_score(
+    criteria: Criteria,
+    vacancies: list[Vacancy],
+    llm: LLMClient,
+    batch_size: int = 15,
+) -> tuple[list[ScoredVacancy], list[str]]:
+    """Score vacancies in batches via LLM. Falls back to heuristic scoring if LLM unavailable."""
+    from .scoring import apply_llm_scores, score_vacancies  # local import avoids circular
+
+    if not vacancies:
+        return [], []
+
+    if not llm.available:
+        return score_vacancies(criteria, vacancies), ["LLM batch score skipped: using heuristic fallback"]
+
+    system = (
+        "Ты рекрутинговый AI-скоринг. Оцени соответствие каждой вакансии профилю кандидата.\n\n"
+        "КРИТИЧЕСКИЕ ПРАВИЛА (нарушение недопустимо):\n"
+        "1. ГОРОД: если кандидат указал конкретный город (например, Москва), а вакансия явно "
+        "находится в другом городе и это НЕ удалённая/дистанционная работа — score ≤ 12.\n"
+        "2. РОЛЬ: если базовая должность принципиально отличается от целевой (аналитик ≠ менеджер, "
+        "аналитик ≠ экономист, аналитик ≠ дизайнер, разработчик ≠ тестировщик) — score ≤ 20, "
+        "даже если есть общие слова в названии. Общее прилагательное ('продуктовый') "
+        "не делает роли совместимыми.\n\n"
+        "Шкала score (0–100):\n"
+        "0–25   — явно не подходит (критические несовпадения: уровень, роль, город)\n"
+        "25–40  — слабое совпадение (роль близкая, но есть существенные расхождения)\n"
+        "40–65  — хорошее совпадение (основное совпадает, мелкие вопросы)\n"
+        "65–100 — отличное совпадение (всё или почти всё соответствует)\n\n"
+        "Дополнительно: если вакансия требует 3+ года опыта, а кандидат без опыта — score ≤ 20.\n"
+        "В concerns пиши только конкретные несоответствия с деталями из текста вакансии, без общих фраз.\n\n"
+        "Верни JSON: {\"scores\": [{\"id\": \"<external_id>\", \"score\": <0-100>, "
+        "\"verdict\": \"<одна фраза>\", \"matched\": [\"<конкретный пункт>\"], "
+        "\"concerns\": [\"<несоответствие с деталью>\"]}]}"
+    )
+
+    batches = [vacancies[i : i + batch_size] for i in range(0, len(vacancies), batch_size)]
+    all_score_items: list[LLMBatchScoreItem] = []
+    traces: list[str] = []
+
+    for batch_idx, batch in enumerate(batches):
+        compact = [
+            {
+                "id": v.external_id,
+                "title": v.title,
+                "company": v.company,
+                "experience": v.experience,
+                "employment": v.employment,
+                "schedule": v.schedule,
+                "salary_min": v.salary_min,
+                "salary_max": v.salary_max,
+                "text": clamp(v.text, 600),
+            }
+            for v in batch
+        ]
+        user = json.dumps(
+            {"candidate_profile": asdict(criteria), "vacancies": compact},
+            ensure_ascii=False,
+        )
+        payload, trace_msg = llm.chat_json(system=system, user=user, fallback={"scores": []})
+        traces.append(f"LLM score batch {batch_idx + 1}/{len(batches)}: {trace_msg}")
+
+        raw_scores = payload.get("scores", []) if isinstance(payload, dict) else []
+        for raw in raw_scores:
+            try:
+                item = LLMBatchScoreItem(
+                    external_id=str(raw.get("id", "")),
+                    score=int(raw.get("score", 0)),
+                    verdict=str(raw.get("verdict", "")),
+                    matched=normalize_llm_list(raw.get("matched")),
+                    concerns=normalize_llm_list(raw.get("concerns")),
+                )
+                if item.external_id:
+                    all_score_items.append(item)
+            except (TypeError, ValueError):
+                continue
+
+    scored = apply_llm_scores(criteria, vacancies, all_score_items)
+    return scored, traces
+
+
+def deep_analyze_top(
+    criteria: Criteria,
+    top: list[ScoredVacancy],
+    llm: LLMClient,
+) -> tuple[dict[str, VacancyDeepAnalysis], list[str]]:
+    """Deep-analyze each top vacancy individually (parallel requests) for rich advice."""
+    if not top:
+        return {}, []
+
+    fallback = {item.vacancy.external_id: _fallback_deep_analysis(item) for item in top}
+
+    if not llm.available:
+        return fallback, ["LLM deep analysis skipped: no API key"]
+
+    system = (
+        "Ты опытный карьерный консультант. Проведи детальный анализ вакансии "
+        "относительно профиля и запроса кандидата.\n\n"
+        "Задачи:\n"
+        "1. Проверь каждое требование вакансии — соответствует ли оно профилю кандидата.\n"
+        "2. Найди скрытые несостыковки (например: вакансия называется 'junior', "
+        "но в описании требуют 3 года опыта и знание сложной архитектуры).\n"
+        "3. Найди красные флаги (нереалистичные требования, слишком размытые обязанности, "
+        "явное несоответствие уровня).\n"
+        "4. Дай конкретный персонализированный совет — называй конкретные требования, "
+        "не пиши 'изучите требования' или 'подготовьте резюме'.\n\n"
+        "Верни JSON: {\"external_id\": \"<id>\", \"overall_match\": <0-100>, "
+        "\"requirement_check\": [{\"requirement\": \"<цитата>\", \"met\": true/false, "
+        "\"comment\": \"<почему>\"}], "
+        "\"red_flags\": [\"<конкретный красный флаг>\"], "
+        "\"inconsistencies\": [\"<несостыковка с деталью>\"], "
+        "\"specific_advice\": \"<конкретный персонализированный совет>\", "
+        "\"final_recommendation\": \"apply|skip|caution\"}"
+    )
+
+    def analyze_one(
+        item: ScoredVacancy,
+    ) -> tuple[str, VacancyDeepAnalysis | None, str]:
+        user = json.dumps(
+            {
+                "candidate_profile": asdict(criteria),
+                "vacancy": {
+                    "id": item.vacancy.external_id,
+                    "title": item.vacancy.title,
+                    "company": item.vacancy.company,
+                    "experience": item.vacancy.experience,
+                    "employment": item.vacancy.employment,
+                    "schedule": item.vacancy.schedule,
+                    "salary_min": item.vacancy.salary_min,
+                    "salary_max": item.vacancy.salary_max,
+                    "text": clamp(item.vacancy.text, 3000),
+                },
+            },
+            ensure_ascii=False,
+        )
+        payload, trace_msg = llm.chat_json(system=system, user=user, fallback={})
+        if not isinstance(payload, dict) or not payload:
+            return item.vacancy.external_id, None, f"deep_analyze id={item.vacancy.external_id}: {trace_msg}"
+        try:
+            req_checks = [
+                RequirementCheck(
+                    requirement=str(r.get("requirement", "")),
+                    met=bool(r.get("met", False)),
+                    comment=str(r.get("comment", "")),
+                )
+                for r in normalize_llm_list_of_dicts(payload.get("requirement_check"))
+                if r.get("requirement")
+            ]
+            analysis = VacancyDeepAnalysis(
+                external_id=str(payload.get("external_id", item.vacancy.external_id)),
+                overall_match=min(100, max(0, int(payload.get("overall_match", 0)))),
+                requirement_check=req_checks,
+                red_flags=normalize_llm_list(payload.get("red_flags")),
+                inconsistencies=normalize_llm_list(payload.get("inconsistencies")),
+                specific_advice=str(payload.get("specific_advice", "")),
+                final_recommendation=str(payload.get("final_recommendation", "caution")),
+            )
+            return item.vacancy.external_id, analysis, f"deep_analyze id={item.vacancy.external_id}: {trace_msg}"
+        except (TypeError, ValueError) as exc:
+            return item.vacancy.external_id, None, f"deep_analyze parse error id={item.vacancy.external_id}: {exc}"
+
+    result: dict[str, VacancyDeepAnalysis] = dict(fallback)
+    traces: list[str] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(top))) as executor:
+        future_map = {executor.submit(analyze_one, item): item for item in top}
+        for future in concurrent.futures.as_completed(future_map):
+            ext_id, analysis, trace_msg = future.result()
+            traces.append(trace_msg)
+            if analysis:
+                result[ext_id] = analysis
+
+    return result, traces
+
+
+def _fallback_deep_analysis(item: ScoredVacancy) -> VacancyDeepAnalysis:
+    hard = [c for c in item.concerns if c.startswith(("hard-mismatch:", "stop-word:"))]
+    soft = [c for c in item.concerns if not c.startswith(("hard-mismatch:", "stop-word:"))]
+    rec = "skip" if hard else ("caution" if item.score < 50 else "apply")
+    return VacancyDeepAnalysis(
+        external_id=item.vacancy.external_id,
+        overall_match=int(min(item.score, 100)),
+        requirement_check=[],
+        red_flags=hard,
+        inconsistencies=soft,
+        specific_advice="Откройте вакансию, проверьте требования к опыту и подготовьте сопроводительное письмо.",
+        final_recommendation=rec,
+    )
 
 
 def heuristic_criteria(user_query: str) -> Criteria:
@@ -333,8 +613,21 @@ def normalize_criteria(criteria: Criteria) -> Criteria:
     criteria.must_have = merge_unique(must_have)
     criteria.nice_to_have = merge_unique(nice_to_have)
     criteria.levels = merge_unique(levels)
-    criteria.stop_words = merge_unique(criteria.stop_words + ["senior", "lead", "middle"])
+    # Only add seniority stop-words when this is clearly a junior/no-experience search.
+    # Otherwise we'd penalize "Главный бухгалтер" or "Старший инженер" queries.
+    if _is_junior_query(criteria):
+        criteria.stop_words = merge_unique(criteria.stop_words + ["senior", "lead", "middle"])
+    else:
+        criteria.stop_words = merge_unique(criteria.stop_words)
     return criteria
+
+
+def _is_junior_query(criteria: Criteria) -> bool:
+    text = " ".join(criteria.levels + [criteria.raw_query]).casefold()
+    return any(
+        m in text
+        for m in ["junior", "джуниор", "стажер", "стажёр", "intern", "без опыта", "до года", "начинающий"]
+    )
 
 
 def infer_role_keywords(user_query: str) -> list[str]:
@@ -343,11 +636,14 @@ def infer_role_keywords(user_query: str) -> list[str]:
     role_tokens = [
         token
         for token in tokens
-        if token and token not in ROLE_FILLER_WORDS and not is_level_term(token)
+        if token
+        and token not in ROLE_FILLER_WORDS
+        and not is_level_term(token)
+        and token not in _CITY_TOKEN_FORMS
+        and not (len(token) == 1 and re.match(r"[a-z]", token))  # skip standalone letters like 'b', 'c'
     ]
     if not role_tokens:
         return []
-
     return [" ".join(role_tokens[:3])]
 
 
@@ -357,9 +653,29 @@ def clean_role_keyword(value: Any) -> str:
     role_tokens = [
         token
         for token in tokens
-        if token and token not in ROLE_FILLER_WORDS and not is_level_term(token)
+        if token
+        and token not in ROLE_FILLER_WORDS
+        and not is_level_term(token)
+        and token not in _CITY_TOKEN_FORMS
+        and not (len(token) == 1 and re.match(r"[a-z]", token))
     ]
     return " ".join(role_tokens).strip()
+
+
+# Minimal Russian soft-stem: strip common inflectional endings to approximate
+# the nominative form. Used only for role token normalization.
+def _soft_stem_ru(token: str) -> str:
+    if not re.search(r"[а-яё]", token) or len(token) <= 4:
+        return token
+    for ending in (
+        "ыми", "ими", "ого", "его", "ому", "ему",
+        "ах", "ях", "ой", "ый", "ий", "ая", "ое", "ую",
+        "ом", "ем", "ым", "им", "ам", "ям",
+        "а", "я", "ы", "и", "у", "ю", "е", "о",
+    ):
+        if token.endswith(ending) and len(token) - len(ending) >= 4:
+            return token[: -len(ending)]
+    return token
 
 
 def has_specific_role(roles: list[str]) -> bool:
@@ -370,17 +686,35 @@ def normalize_role_token(value: str) -> str:
     return value.strip("-_ ")
 
 
+# Words that indicate the captured text is NOT a city name.
+_CITY_FALSE_POSITIVE_WORDS = {
+    "не", "нет", "любом", "вашем", "любой", "важен", "важно", "указан",
+    "указано", "указана", "нужен", "нужно", "разных", "другом",
+    "любой", "дома", "месте", "место", "планете",
+}
+
+
 def infer_city_keywords(user_query: str) -> list[str]:
-    patterns = [
-        r"\b(?:город|г\.?)\s+([a-zа-яё-]+(?:\s+[a-zа-яё-]+){0,2})",
-        r"\b(?:в|во)\s+([А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2})",
-    ]
+    # Pattern 1: 'город X' or 'г. X'
+    pat_explicit = r"\b(?:город|г\.?)\s+([a-zа-яё-]+(?:\s+[a-zа-яё-]+){0,2})"
+    # Pattern 2: 'в/во ИмяГорода [область/край/...]'
+    pat_prep = (
+        r"\b(?:в|во)\s+"
+        r"([А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2}"
+        + _GEO_SUFFIX
+        + r")"
+    )
     cities: list[str] = []
-    for pattern in patterns:
+    for pattern in (pat_explicit, pat_prep):
         for match in re.finditer(pattern, user_query, flags=re.IGNORECASE):
-            city = clean_city_keyword(match.group(1))
-            if city:
-                cities.append(city)
+            raw = match.group(1).strip()
+            city = clean_city_keyword(raw)
+            city = normalize_city_to_nominative(city)
+            if not city or len(city) < 3:
+                continue
+            if any(w in _CITY_FALSE_POSITIVE_WORDS for w in city.casefold().split()):
+                continue
+            cities.append(city)
     return merge_unique(cities)
 
 
@@ -396,9 +730,26 @@ def infer_level_keywords(text: str) -> list[str]:
     return merge_unique(result)
 
 
+# Regex pattern for optional geographic suffix (oblast, kray, okrug, etc.)
+_GEO_SUFFIX = (
+    r"(?:\s+(?:"
+    r"область|области|областию|"
+    r"край|края|крае|краю|"
+    r"округ|округа|округе|округу|"
+    r"район|района|районе|району|"
+    r"республика|республики|республике|"
+    r"регион|региона|регионе"
+    r"))?"
+)
+
+
 def strip_non_role_fragments(text: str) -> str:
     text = re.sub(r"\b(?:город|г\.?)\s+[a-zа-яё-]+(?:\s+[a-zа-яё-]+){0,2}", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b(?:в|во)\s+[А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2}", " ", text)
+    # Strip city/region references: 'в Липецкой области', 'в Санкт-Петербурге', 'во Владивостоке'
+    text = re.sub(
+        r"\b(?:в|во)\s+[А-ЯЁ][а-яё-]+(?:[-\s][А-ЯЁ][а-яё-]+){0,2}" + _GEO_SUFFIX,
+        " ", text, flags=re.IGNORECASE,
+    )
     text = re.sub(r"\b(?:знаю|умею|навыки|стек|технологии)\b.*", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:без опыта|без опыта работы|до года|junior|джуниор|стаж[её]р|стажировка|intern(?:ship)?|remote)\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(?:удал[её]нн?о|дистанционно|зарплата|оклад|от|до)\b\s*\d*[\s\d]*(?:к|k|тыс|000|руб(?:лей)?)?", " ", text, flags=re.IGNORECASE)
@@ -426,6 +777,7 @@ def normalize_extracted_cities(raw_query: str, cities: list[str]) -> list[str]:
     result: list[str] = []
 
     for city in cities:
+        city = normalize_city_to_nominative(city)
         normalized_city = city.casefold().strip()
         if not normalized_city:
             continue
@@ -439,6 +791,226 @@ def normalize_extracted_cities(raw_query: str, cities: list[str]) -> list[str]:
         result.append(city)
 
     return merge_unique(result)
+
+
+# Maps common Russian city forms (genitive, prepositional, dative) → nominative.
+# Covers all cities with population 100k+.
+CITY_OBLIQUE_TO_NOMINATIVE: dict[str, str] = {
+    "москве": "Москва",
+    "москвы": "Москва",
+    "москву": "Москва",
+    "санкт-петербурге": "Санкт-Петербург",
+    "санкт-петербурга": "Санкт-Петербург",
+    "петербурге": "Санкт-Петербург",
+    "петербурга": "Санкт-Петербург",
+    "питере": "Санкт-Петербург",
+    "новосибирске": "Новосибирск",
+    "новосибирска": "Новосибирск",
+    "екатеринбурге": "Екатеринбург",
+    "екатеринбурга": "Екатеринбург",
+    "нижнем новгороде": "Нижний Новгород",
+    "нижнего новгорода": "Нижний Новгород",
+    "казани": "Казань",
+    "челябинске": "Челябинск",
+    "челябинска": "Челябинск",
+    "омске": "Омск",
+    "омска": "Омск",
+    "самаре": "Самара",
+    "самары": "Самара",
+    "ростове-на-дону": "Ростов-на-Дону",
+    "ростове": "Ростов-на-Дону",
+    "уфе": "Уфа",
+    "уфы": "Уфа",
+    "красноярске": "Красноярск",
+    "красноярска": "Красноярск",
+    "воронеже": "Воронеж",
+    "воронежа": "Воронеж",
+    "перми": "Пермь",
+    "волгограде": "Волгоград",
+    "волгограда": "Волгоград",
+    "краснодаре": "Краснодар",
+    "краснодара": "Краснодар",
+    "саратове": "Саратов",
+    "саратова": "Саратов",
+    "тюмени": "Тюмень",
+    "ижевске": "Ижевск",
+    "ижевска": "Ижевск",
+    "барнауле": "Барнаул",
+    "барнаула": "Барнаул",
+    "ульяновске": "Ульяновск",
+    "ульяновска": "Ульяновск",
+    "иркутске": "Иркутск",
+    "иркутска": "Иркутск",
+    "хабаровске": "Хабаровск",
+    "хабаровска": "Хабаровск",
+    "владивостоке": "Владивосток",
+    "владивостока": "Владивосток",
+    "ярославле": "Ярославль",
+    "ярославля": "Ярославль",
+    "томске": "Томск",
+    "томска": "Томск",
+    "оренбурге": "Оренбург",
+    "оренбурга": "Оренбург",
+    "новокузнецке": "Новокузнецк",
+    "новокузнецка": "Новокузнецк",
+    "рязани": "Рязань",
+    "астрахани": "Астрахань",
+    "набережных челнах": "Набережные Челны",
+    "набережных челнов": "Набережные Челны",
+    "пензе": "Пенза",
+    "пензы": "Пенза",
+    "липецке": "Липецк",
+    "липецка": "Липецк",
+    "кирове": "Киров",
+    "кирова": "Киров",
+    "чебоксарах": "Чебоксары",
+    "чебоксар": "Чебоксары",
+    "туле": "Тула",
+    "тулы": "Тула",
+    "балашихе": "Балашиха",
+    "балашихи": "Балашиха",
+    "твери": "Тверь",
+    "калуге": "Калуга",
+    "калуги": "Калуга",
+    "ставрополе": "Ставрополь",
+    "ставрополя": "Ставрополь",
+    "белгороде": "Белгород",
+    "белгорода": "Белгород",
+    "владимире": "Владимир",
+    "владимира": "Владимир",
+    "симферополе": "Симферополь",
+    "симферополя": "Симферополь",
+    "брянске": "Брянск",
+    "брянска": "Брянск",
+    "курске": "Курск",
+    "курска": "Курск",
+    "магнитогорске": "Магнитогорск",
+    "магнитогорска": "Магнитогорск",
+    "нижнем тагиле": "Нижний Тагил",
+    "нижнего тагила": "Нижний Тагил",
+    "иванове": "Иваново",
+    "иванова": "Иваново",
+    "химках": "Химки",
+    "химок": "Химки",
+    "сургуте": "Сургут",
+    "сургута": "Сургут",
+    "архангельске": "Архангельск",
+    "архангельска": "Архангельск",
+    "чите": "Чита",
+    "читы": "Чита",
+    "смоленске": "Смоленск",
+    "смоленска": "Смоленск",
+    "калининграде": "Калининград",
+    "калининграда": "Калининград",
+    "мурманске": "Мурманск",
+    "мурманска": "Мурманск",
+    "пскове": "Псков",
+    "пскова": "Псков",
+    "великом новгороде": "Великий Новгород",
+    "великого новгорода": "Великий Новгород",
+    "якутске": "Якутск",
+    "якутска": "Якутск",
+    "петрозаводске": "Петрозаводск",
+    "петрозаводска": "Петрозаводск",
+    "южно-сахалинске": "Южно-Сахалинск",
+    "южно-сахалинска": "Южно-Сахалинск",
+    "комсомольске-на-амуре": "Комсомольск-на-Амуре",
+    "улан-удэ": "Улан-Удэ",
+    "махачкале": "Махачкала",
+    "махачкалы": "Махачкала",
+    "грозном": "Грозный",
+    "грозного": "Грозный",
+    "астане": "Астана",
+    "алматы": "Алматы",
+    "минске": "Минск",
+    "минска": "Минск",
+}
+
+
+def normalize_city_to_nominative(city: str) -> str:
+    """Convert a city/region name from any oblique case to nominative."""
+    if not city:
+        return city
+    key = city.casefold().strip()
+    # Direct dictionary lookup (covers city forms)
+    nominative = CITY_OBLIQUE_TO_NOMINATIVE.get(key)
+    if nominative:
+        return nominative
+    # Region pattern: adjective + geographic noun (e.g. 'Липецкой области')
+    region = _normalize_region_phrase(city)
+    if region != city:
+        return region
+    return city
+
+
+_REGION_NOUNS: dict[str, str] = {
+    "область": "область",
+    "области": "область",
+    "областью": "область",
+    "край": "край",
+    "края": "край",
+    "крае": "край",
+    "краю": "край",
+    "округ": "округ",
+    "округа": "округ",
+    "округе": "округ",
+    "округу": "округ",
+    "район": "район",
+    "района": "район",
+    "районе": "район",
+    "республика": "республика",
+    "республики": "республика",
+    "республике": "республика",
+    "регион": "регион",
+    "региона": "регион",
+    "регионе": "регион",
+}
+
+# Adjective ending conversions: oblique (gen/prep/dat) -> nominative
+_ADJ_ENDINGS: list[tuple[str, str]] = [
+    ("ского", "ский"),  # Краснодарского → Краснодарский
+    ("ском", "ский"),   # Краснодарском → Краснодарский
+    ("ской", "ская"),   # Липецкой → Липецкая
+    ("скому", "ский"), # dative
+    ("ного", "ный"),    # Ижевсконого → ... (fallback)
+    ("ном", "ный"),     # препозициональ
+    ("ной", "ная"),     # Липецконой → Липецконая (редко)
+    ("ого", "ый"),      # Нижегородского... fallback
+    ("ом", "ый"),       # prepositional masc/neut
+    ("ой", "ая"),       # Липецкой → Липецкая (short fallback)
+    ("ей", "яя"),       # Тверской / Тверская
+]
+
+
+def _adj_to_nominative(adj: str) -> str:
+    """Convert Russian adjective from any oblique case to approximate nominative."""
+    lower = adj.casefold()
+    prefix = adj[0].upper() + adj[1:] if adj else adj  # preserve capitalisation
+    for old, new in _ADJ_ENDINGS:
+        if lower.endswith(old) and len(lower) - len(old) >= 3:
+            stem = adj[: len(adj) - len(old)]
+            return stem[0].upper() + stem[1:] + new
+    return prefix
+
+
+def _normalize_region_phrase(text: str) -> str:
+    """Convert region phrase like 'Липецкой области' -> 'Липецкая область'."""
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return text
+    noun_lower = parts[-1].casefold()
+    noun_nom = _REGION_NOUNS.get(noun_lower)
+    if not noun_nom:
+        return text
+    adj_nom = _adj_to_nominative(" ".join(parts[:-1]))
+    return f"{adj_nom} {noun_nom}"
+
+
+# Flat set of all city token forms (keys + lowercased values) for fast role-token filtering.
+_CITY_TOKEN_FORMS: frozenset[str] = frozenset(
+    list(CITY_OBLIQUE_TO_NOMINATIVE.keys())
+    + [v.casefold() for v in CITY_OBLIQUE_TO_NOMINATIVE.values()]
+)
 
 
 def fallback_explanations(top: list[ScoredVacancy]) -> dict[str, VacancyExplanation]:

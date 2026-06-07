@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import AgentResult, Criteria, ScoredVacancy, VacancyExplanation
+from .models import AgentResult, Criteria, ScoredVacancy, VacancyDeepAnalysis
 from .render import format_salary
 from .sources import source_label
 
@@ -33,30 +33,37 @@ def criteria_to_payload(criteria: Criteria) -> dict[str, str | list[str]]:
 
 def vacancy_to_payload(
     item: ScoredVacancy,
-    explanations: dict[str, VacancyExplanation],
+    explanations: dict[str, VacancyDeepAnalysis],
 ) -> dict[str, Any]:
     vacancy = item.vacancy
-    explanation = explanations.get(vacancy.external_id)
-    concerns = ensure_text_list(explanation.concerns) if explanation else item.concerns
-    matched = ensure_text_list(explanation.matched_requirements) if explanation else item.matched
-    next_step = (
-        sanitize_next_step(explanation.next_step)
-        if explanation
-        else "Открыть вакансию, проверить требования и подготовить короткий отклик."
-    )
+    analysis = explanations.get(vacancy.external_id)
+
+    if analysis:
+        concerns = analysis.red_flags + analysis.inconsistencies
+        matched = [r.requirement for r in analysis.requirement_check if r.met]
+        next_step = sanitize_next_step(analysis.specific_advice)
+        recommendation = analysis.final_recommendation
+        score = analysis.overall_match
+    else:
+        concerns = item.concerns
+        matched = item.matched
+        next_step = "Открыть вакансию, проверить требования и подготовить короткий отклик."
+        recommendation = "caution"
+        score = round(item.score)
 
     return {
         "title": vacancy.title,
         "company": vacancy.company or "Компания не указана",
         "location": format_location(vacancy),
         "salary": format_salary_rub(vacancy.salary_min, vacancy.salary_max),
-        "score": round(item.score),
+        "score": score,
         "why": format_matched(matched),
-        "concern": format_concerns(concerns),
+        "concern": format_concerns(ensure_text_list(concerns)),
         "next": next_step,
         "link": vacancy.url,
         "source": vacancy.source,
         "source_label": source_label(vacancy.source),
+        "recommendation": recommendation,
     }
 
 

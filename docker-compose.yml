@@ -1,0 +1,16 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: t-bank-ai-case
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SUPERJOB_API_KEY: ${SUPERJOB_API_KEY:-}
+      SUPERJOB_SECRET: ${SUPERJOB_SECRET:-}
+      SUPERJOB_TOKEN: ${SUPERJOB_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}

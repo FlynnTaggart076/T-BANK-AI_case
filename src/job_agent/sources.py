@@ -77,8 +77,19 @@ class TrudvsemSource:
         self.limit_per_query = limit_per_query
         self.timeout_seconds = timeout_seconds
 
-    def fetch(self, criteria: Criteria) -> SourceResult:
-        queries = build_search_queries(criteria)
+    def fetch(self, criteria: Criteria, extra_queries: list[str] | None = None) -> SourceResult:
+        heuristic_queries = build_search_queries(criteria)
+        if extra_queries:
+            seen: set[str] = set()
+            merged: list[str] = []
+            for q in extra_queries + heuristic_queries:
+                key = q.casefold().strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    merged.append(q)
+            queries = merged[:10]
+        else:
+            queries = heuristic_queries
         region_codes = [REGION_CODES[c.casefold()] for c in criteria.cities if c.casefold() in REGION_CODES]
         trace: list[str] = []
         vacancies: list[Vacancy] = []
@@ -86,8 +97,16 @@ class TrudvsemSource:
         if not queries:
             queries = [criteria.raw_query]
 
+        # When a known region code exists and the job is not explicitly remote,
+        # skip the all-Russia request to avoid off-city noise (e.g. Krasnoyarsk
+        # results appearing on top of a Moscow search).
+        skip_global = bool(region_codes) and criteria.remote is not True
+        if skip_global:
+            trace.append(f"Trudvsem: skipping global request (city-focused mode, regions={region_codes})")
+
         for query in queries:
-            vacancies.extend(self._request(query=query, region_code=None, criteria=criteria, trace=trace))
+            if not skip_global:
+                vacancies.extend(self._request(query=query, region_code=None, criteria=criteria, trace=trace))
             for region_code in region_codes:
                 vacancies.extend(
                     self._request(query=query, region_code=region_code, criteria=criteria, trace=trace)
@@ -149,14 +168,24 @@ class SuperJobSource:
         self.limit_per_query = min(max(limit_per_query, 1), 100)
         self.timeout_seconds = timeout_seconds
 
-    def fetch(self, criteria: Criteria) -> SourceResult:
+    def fetch(self, criteria: Criteria, extra_queries: list[str] | None = None) -> SourceResult:
         if not self.api_key:
             return SourceResult(
                 vacancies=[],
                 trace=["SuperJob skipped: API key not found"],
             )
 
-        queries = build_search_queries(criteria) or [criteria.raw_query]
+        if extra_queries:
+            seen: set[str] = set()
+            merged: list[str] = []
+            for q in extra_queries + (build_search_queries(criteria) or [criteria.raw_query]):
+                key = q.casefold().strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    merged.append(q)
+            queries = merged[:10]
+        else:
+            queries = build_search_queries(criteria) or [criteria.raw_query]
         cities = criteria.cities or [""]
         trace: list[str] = []
         vacancies: list[Vacancy] = []

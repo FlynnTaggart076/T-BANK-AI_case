@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 import re
 
-from .models import Criteria, ScoredVacancy, Vacancy
+from .models import Criteria, LLMBatchScoreItem, ScoredVacancy, Vacancy
 from .utils import contains_any
 
 
@@ -125,10 +125,37 @@ def score_vacancies(criteria: Criteria, vacancies: list[Vacancy]) -> list[Scored
     return scored
 
 
+def apply_llm_scores(
+    criteria: Criteria,
+    vacancies: list[Vacancy],
+    llm_scores: list[LLMBatchScoreItem],
+) -> list[ScoredVacancy]:
+    """Merge LLM batch scores with vacancies. Falls back to heuristic for any vacancy not covered."""
+    score_map = {item.external_id: item for item in llm_scores}
+    result: list[ScoredVacancy] = []
+    for vacancy in vacancies:
+        llm_item = score_map.get(vacancy.external_id)
+        if llm_item:
+            result.append(
+                ScoredVacancy(
+                    vacancy=vacancy,
+                    score=float(llm_item.score),
+                    matched=llm_item.matched,
+                    concerns=llm_item.concerns,
+                    filtered_out=llm_item.score < 40,
+                )
+            )
+        else:
+            result.append(_score_one(criteria, vacancy))
+    result.sort(key=lambda item: item.score, reverse=True)
+    return result
+
+
 def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
     text = normalize_match_text(vacancy.text)
     title_text = normalize_match_text(vacancy.title)
-    raw_query_text = normalize_match_text(criteria.raw_query)
+    # Use role_keywords (not raw_query) for title matching to avoid city/level contamination
+    role_query_text = normalize_match_text(" ".join(criteria.role_keywords))
     matched: list[str] = []
     concerns: list[str] = []
     score = 0.0
@@ -149,7 +176,7 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
         score -= 30
         concerns.append("роль не совпала явно")
 
-    title_match = title_query_match(raw_query_text, title_text)
+    title_match = title_query_match(role_query_text, title_text)
     if title_match == "exact":
         score += 28
         matched.append("title:exact")
@@ -189,7 +216,14 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
         score -= 40 + 10 * min(len(hard_mismatches), 3)
         concerns.extend(f"hard-mismatch:{item}" for item in hard_mismatches[:4])
 
-    stop_matches = contains_any_match(text, criteria.stop_words + DEFAULT_STOP_WORDS)
+    # Exclude stop words that the user intentionally included in their role query
+    # (e.g. "Главный бухгалтер" should not be penalized for containing "главный")
+    role_lower_tokens = set(normalize_match_text(" ".join(criteria.role_keywords)).split())
+    effective_stops = [
+        w for w in (criteria.stop_words + DEFAULT_STOP_WORDS)
+        if not any(t in role_lower_tokens for t in normalize_match_text(w).split())
+    ]
+    stop_matches = contains_any_match(text, effective_stops)
     if stop_matches:
         score -= min(len(stop_matches), 4) * 12
         concerns.extend(f"stop-word:{item}" for item in stop_matches[:4])
@@ -201,16 +235,19 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
             matched.append("format:remote")
         else:
             concerns.append("удаленный формат не подтвержден")
-    elif criteria.remote is False and criteria.cities:
+    elif criteria.cities:
         city_matches = contains_any_match(text, criteria.cities)
+        vacancy_is_remote = bool(contains_any_match(text, REMOTE_WORDS))
         if city_matches:
             score += 10
             matched.append(f"city:{city_matches[0]}")
+        elif vacancy_is_remote:
+            # Remote vacancy — city mismatch is acceptable
+            score += 4
+            matched.append("format:remote-ok")
         else:
-            concerns.append("город не совпал явно")
-    elif criteria.cities and contains_any_match(text, criteria.cities):
-        score += 8
-        matched.append("city")
+            score -= 35
+            concerns.append("город не совпал")
 
     if criteria.min_salary:
         if vacancy.salary_min and vacancy.salary_min >= criteria.min_salary:
@@ -250,7 +287,12 @@ def _score_one(criteria: Criteria, vacancy: Vacancy) -> ScoredVacancy:
         or (bool(specific_role_words) and not has_specific_role_match and not role_matches)
         or (bool(required_skill_words) and not required_skill_matches)
         or (bool(criteria.levels) and not level_matches and not role_matches)
-        or (criteria.remote is False and bool(criteria.cities) and not city_matches)
+        or (
+            bool(criteria.cities)
+            and criteria.remote is not True
+            and not city_matches
+            and not contains_any_match(text, REMOTE_WORDS)
+        )
     )
     return ScoredVacancy(
         vacancy=vacancy,
@@ -276,6 +318,8 @@ def contains_any_match(text: str, words: list[str]) -> list[str]:
             len(word_tokens) > 1 and all(token in normalized_text_tokens for token in word_tokens)
         ) or (
             len(soft_word_tokens) > 1 and all(token in soft_text_tokens for token in soft_word_tokens)
+        ) or (
+            len(word_tokens) == 1 and soft_word_tokens[0] in soft_text_tokens
         ):
             result.append(word)
     return result

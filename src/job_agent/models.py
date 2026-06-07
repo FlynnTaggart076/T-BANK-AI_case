@@ -61,12 +61,40 @@ class Vacancy:
 
 
 @dataclass(slots=True)
+class RequirementCheck:
+    requirement: str
+    met: bool
+    comment: str
+
+
+@dataclass(slots=True)
+class LLMBatchScoreItem:
+    external_id: str
+    score: int
+    verdict: str
+    matched: list[str]
+    concerns: list[str]
+
+
+@dataclass(slots=True)
+class VacancyDeepAnalysis:
+    external_id: str
+    overall_match: int
+    requirement_check: list[RequirementCheck]
+    red_flags: list[str]
+    inconsistencies: list[str]
+    specific_advice: str
+    final_recommendation: str  # "apply" | "skip" | "caution"
+
+
+@dataclass(slots=True)
 class ScoredVacancy:
     vacancy: Vacancy
     score: float
     matched: list[str] = field(default_factory=list)
     concerns: list[str] = field(default_factory=list)
     filtered_out: bool = False
+    deep_analysis: VacancyDeepAnalysis | None = None
 
 
 @dataclass(slots=True)
@@ -84,7 +112,7 @@ class AgentResult:
     criteria: Criteria
     vacancies: list[ScoredVacancy]
     top: list[ScoredVacancy]
-    explanations: dict[str, VacancyExplanation]
+    explanations: dict[str, VacancyDeepAnalysis]
     report_path: str
     log_path: str
     trace: list[str]

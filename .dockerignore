@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.DS_Store
+.env
+OpenAI token.txt
+SuperJob token.txt
+Telegram token.txt
+output/run.log
+output/report.md

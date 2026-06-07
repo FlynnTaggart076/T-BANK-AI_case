@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from .llm import LLMClient, explain_top, extract_criteria
+from .llm import LLMClient, deep_analyze_top, extract_criteria, generate_search_filters, llm_batch_score
 from .models import AgentResult
 from .render import render_report, write_run_log
-from .scoring import score_vacancies, validate_and_dedupe
+from .scoring import validate_and_dedupe
 from .sources import (
     SOURCE_ALL,
     SOURCE_LOCAL,
@@ -39,32 +39,37 @@ class VacancyAgentPipeline:
         trace.extend(criteria_trace)
         trace.append(f"Criteria extracted: roles={criteria.role_keywords}, skills={criteria.skill_keywords}")
 
+        llm_queries, _api_filters, filter_trace = generate_search_filters(criteria, self.llm)
+        trace.extend(filter_trace)
+
         vacancies = []
-        for source_result in self.fetch_from_sources(criteria, source):
+        for source_result in self.fetch_from_sources(criteria, source, llm_queries=llm_queries or None):
             trace.extend(source_result.trace)
             vacancies.extend(source_result.vacancies)
 
         valid_vacancies, validation_trace = validate_and_dedupe(vacancies)
         trace.extend(validation_trace)
 
-        scored = score_vacancies(criteria, valid_vacancies)
+        scored, score_trace = llm_batch_score(criteria, valid_vacancies, self.llm)
+        trace.extend(score_trace)
         top = [item for item in scored if not item.filtered_out][:top_n]
 
         if self.should_use_local_fallback(source, len(top), top_n):
             fallback_result = self.local_source.fetch(criteria)
             trace.append(
-                f"Only {len(top)} relevant vacancies after source scoring; local fallback enabled"
+                f"Only {len(top)} relevant vacancies after LLM scoring; local fallback enabled"
             )
             trace.extend(fallback_result.trace)
             combined = valid_vacancies + fallback_result.vacancies
             valid_vacancies, validation_trace = validate_and_dedupe(combined)
             trace.extend(validation_trace)
-            scored = score_vacancies(criteria, valid_vacancies)
+            scored, score_trace = llm_batch_score(criteria, valid_vacancies, self.llm)
+            trace.extend(score_trace)
             top = [item for item in scored if not item.filtered_out][:top_n]
 
         trace.append(f"Scored {len(scored)} vacancies; top={len(top)}")
 
-        explanations, explanation_trace = explain_top(criteria, top, self.llm)
+        explanations, explanation_trace = deep_analyze_top(criteria, top, self.llm)
         trace.extend(explanation_trace)
 
         report_path = render_report(criteria, top, scored, explanations, trace)
@@ -81,19 +86,19 @@ class VacancyAgentPipeline:
             trace=trace,
         )
 
-    def fetch_from_sources(self, criteria, source: str):
+    def fetch_from_sources(self, criteria, source: str, llm_queries: list[str] | None = None):
         if source == SOURCE_TRUDVSEM:
-            return [self.trudvsem_source.fetch(criteria)]
+            return [self.trudvsem_source.fetch(criteria, extra_queries=llm_queries)]
         if source == SOURCE_SUPERJOB:
-            return [self.superjob_source.fetch(criteria)]
+            return [self.superjob_source.fetch(criteria, extra_queries=llm_queries)]
         if source == SOURCE_ALL:
             return [
-                self.trudvsem_source.fetch(criteria),
-                self.superjob_source.fetch(criteria),
+                self.trudvsem_source.fetch(criteria, extra_queries=llm_queries),
+                self.superjob_source.fetch(criteria, extra_queries=llm_queries),
             ]
         if source == SOURCE_LOCAL:
             return [self.local_source.fetch(criteria)]
-        return [self.trudvsem_source.fetch(criteria)]
+        return [self.trudvsem_source.fetch(criteria, extra_queries=llm_queries)]
 
     def should_use_local_fallback(self, source: str, top_count: int, top_n: int) -> bool:
         if not self.use_local_fallback or top_count >= top_n:

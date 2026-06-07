@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from pathlib import Path
 
-from .models import Criteria, ScoredVacancy, VacancyExplanation
+from .models import Criteria, ScoredVacancy, VacancyDeepAnalysis
 from .utils import ROOT, clamp
 
 
@@ -11,7 +11,7 @@ def render_report(
     criteria: Criteria,
     top: list[ScoredVacancy],
     all_scored: list[ScoredVacancy],
-    explanations: dict[str, VacancyExplanation],
+    explanations: dict[str, VacancyDeepAnalysis],
     trace: list[str],
     output_path: Path | None = None,
 ) -> Path:
@@ -58,21 +58,19 @@ def render_report(
         lines.append(f"- **Matched:** {', '.join(item.matched) if item.matched else 'none'}")
         lines.append(f"- **Concerns:** {', '.join(item.concerns) if item.concerns else 'none'}")
         if explanation:
-            lines.append(f"- **Agent verdict:** {explanation.suitability}")
-            lines.append(
-                "- **Agent matched:** "
-                + (
-                    ", ".join(explanation.matched_requirements)
-                    if explanation.matched_requirements
-                    else "none"
-                )
-            )
-            lines.append(
-                "- **Agent concerns:** "
-                + (", ".join(explanation.concerns) if explanation.concerns else "none")
-            )
-            lines.append(f"- **Next step:** {explanation.next_step}")
-            lines.append(f"- **Priority:** {explanation.priority}")
+            lines.append(f"- **LLM match:** {explanation.overall_match}/100")
+            lines.append(f"- **Recommendation:** {explanation.final_recommendation}")
+            met = [r.requirement for r in explanation.requirement_check if r.met]
+            unmet = [r.requirement for r in explanation.requirement_check if not r.met]
+            if met:
+                lines.append(f"- **Requirements met:** {', '.join(met[:5])}")
+            if unmet:
+                lines.append(f"- **Requirements not met:** {', '.join(unmet[:5])}")
+            if explanation.red_flags:
+                lines.append(f"- **Red flags:** {', '.join(explanation.red_flags)}")
+            if explanation.inconsistencies:
+                lines.append(f"- **Inconsistencies:** {', '.join(explanation.inconsistencies)}")
+            lines.append(f"- **Advice:** {explanation.specific_advice}")
         snippet = clamp(vacancy.requirements or vacancy.description or vacancy.responsibilities, 450)
         if snippet:
             lines.append("")
