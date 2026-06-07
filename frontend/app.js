@@ -11,64 +11,76 @@ const criteriaPanel = document.querySelector("#criteria-panel");
 const vacanciesPanel = document.querySelector("#vacancies-panel");
 const vacancyList = document.querySelector("#vacancy-list");
 const cardTemplate = document.querySelector("#vacancy-card-template");
+const tracePanel = document.querySelector("#trace-panel");
 const traceList = document.querySelector("#trace-list");
+const traceSummaryText = document.querySelector("#trace-summary-text");
 const criteriaValues = Array.from(document.querySelectorAll(".criteria-grid dd"));
 const resultCount = document.querySelector(".result-count");
 const confidenceBadge = document.querySelector(".confidence-badge");
-const heroFitScore = document.querySelector("#hero-fit-score");
-const heroSkillRow = document.querySelector("#hero-skill-row");
-const heroRole = document.querySelector("#hero-role");
-const heroFormat = document.querySelector("#hero-format");
 const topSlider = document.querySelector("#top-slider");
 const topValue = document.querySelector("#top-value");
-const signalBars = Array.from(document.querySelectorAll(".signal-grid span"));
 const sourceInputs = Array.from(document.querySelectorAll('input[name="source"]'));
+const exampleButtons = Array.from(document.querySelectorAll("[data-query]"));
+
+const summaryStatus = document.querySelector("#summary-status");
+const summaryScore = document.querySelector("#summary-score");
+const scoreRing = document.querySelector("#score-ring");
+const summaryMessage = document.querySelector("#summary-message");
+const summaryDetail = document.querySelector("#summary-detail");
+const summarySource = document.querySelector("#summary-source");
+const summaryRole = document.querySelector("#summary-role");
+const summaryCity = document.querySelector("#summary-city");
+const summarySalary = document.querySelector("#summary-salary");
+const summaryCount = document.querySelector("#summary-count");
+const pipelineLabel = document.querySelector("#pipeline-label");
+const pipelineBarFill = document.querySelector("#pipeline-bar-fill");
+const pipelineSteps = Array.from(document.querySelectorAll("#pipeline-steps li"));
+
+const emptyTrace = [
+  {
+    title: "Запрос ожидается",
+    text: "Опишите желаемую работу и запустите поиск.",
+  },
+  {
+    title: "Критерии",
+    text: "Агент выделит роль, уровень, навыки, город, формат и зарплату.",
+  },
+  {
+    title: "Источники",
+    text: "Вакансии будут получены из выбранных источников.",
+  },
+  {
+    title: "Ранжирование",
+    text: "Подходящие карточки будут отсортированы по score.",
+  },
+];
 
 function buildLoadingTrace(sourceLabel) {
   return [
     {
       title: "Запрос принят",
-      text: `Текст пользователя отправлен backend API. Источник: ${sourceLabel}.`,
+      text: `Описание отправлено агенту. Источник: ${sourceLabel}.`,
     },
     {
       title: "Критерии извлекаются",
-      text: "LLM и fallback-эвристики выделяют роль, уровень, город и навыки.",
+      text: "Модель определяет роль, город, опыт, навыки и ограничения.",
     },
     {
       title: "Вакансии ищутся",
-      text: "Backend обращается к выбранному источнику и получает карточки вакансий.",
+      text: "Backend обращается к источникам и собирает кандидатов.",
     },
     {
       title: "Топ формируется",
-      text: "Кандидаты валидируются, дедуплицируются и ранжируются.",
+      text: "Вакансии проверяются, очищаются от дублей и ранжируются.",
     },
   ];
 }
-
-const emptyTrace = [
-  {
-    title: "Запрос ожидается",
-    text: "Агент готов принять описание кандидата.",
-  },
-  {
-    title: "Критерии будут извлечены",
-    text: "Роль, уровень, навыки, город, формат и зарплата.",
-  },
-  {
-    title: "Вакансии будут найдены",
-    text: "Выдача появится после запуска поиска.",
-  },
-  {
-    title: "Топ будет сформирован",
-    text: "Карточки отсортируются по score.",
-  },
-];
 
 function renderTrace(items, activeIndex = null) {
   traceList.innerHTML = "";
 
   items.forEach((item, index) => {
-    const li = document.createElement("li");
+    const row = document.createElement("li");
     const marker = document.createElement("span");
     const content = document.createElement("div");
     const title = document.createElement("strong");
@@ -78,14 +90,14 @@ function renderTrace(items, activeIndex = null) {
     title.textContent = item.title;
     text.textContent = item.text;
     content.append(title, text);
-    li.append(marker, content);
+    row.append(marker, content);
 
     if (activeIndex !== null) {
-      li.classList.toggle("is-complete", index < activeIndex);
-      li.classList.toggle("is-active", index === activeIndex);
+      row.classList.toggle("is-complete", index < activeIndex);
+      row.classList.toggle("is-active", index === activeIndex);
     }
 
-    traceList.append(li);
+    traceList.append(row);
   });
 }
 
@@ -97,11 +109,43 @@ function setTraceState(activeIndex) {
   });
 }
 
-function resetTrace() {
-  renderTrace(emptyTrace);
+function renderBackendTrace(trace) {
+  const items = normalizeTrace(trace);
+  renderTrace(items, items.length);
+  traceSummaryText.textContent = `${items.length} этапов выполнено`;
 }
 
-function hideResults() {
+function normalizeTrace(trace) {
+  if (!Array.isArray(trace) || !trace.length) {
+    return buildLoadingTrace(getSelectedSourceLabel());
+  }
+
+  return trace.slice(0, 12).map((line, index) => {
+    const text = String(line);
+    return {
+      title: traceTitle(text, index),
+      text,
+    };
+  });
+}
+
+function traceTitle(text, index) {
+  const normalized = text.toLowerCase();
+  if (normalized.includes("запрос принят")) return "Запрос принят";
+  if (normalized.includes("критери")) return "Критерии извлечены";
+  if (normalized.includes("источник")) return "Источники выбраны";
+  if (normalized.includes("получено вакансий")) return "Вакансии получены";
+  if (normalized.includes("дубл")) return "Дубли удалены";
+  if (normalized.includes("проверен")) return "Кандидаты проверены";
+  if (normalized.includes("топ")) return "Топ сформирован";
+  if (normalized.includes("superjob")) return "Шаг SuperJob";
+  if (normalized.includes("работа россии") || normalized.includes("trudvsem")) {
+    return "Шаг Работа России";
+  }
+  return index === 0 ? "Pipeline" : `Шаг ${index + 1}`;
+}
+
+function hideResultPanels() {
   criteriaPanel.hidden = true;
   vacanciesPanel.hidden = true;
   errorPanel.hidden = true;
@@ -109,7 +153,9 @@ function hideResults() {
 
 function setButtonLoading(isLoading) {
   searchButton.disabled = isLoading;
-  searchButton.querySelector("span").textContent = isLoading ? "Идет поиск" : "Найти вакансии";
+  searchButton.querySelector("span").textContent = isLoading
+    ? "Агент ищет..."
+    : "Найти вакансии";
 }
 
 function showError(title, message, trace = []) {
@@ -139,13 +185,16 @@ function renderCriteria(criteria) {
     const target = criteriaValues[index];
     if (!target) return;
 
+    target.classList.remove("tag-row");
+    target.innerHTML = "";
+
     if (Array.isArray(value)) {
-      target.classList.add("tag-row");
-      target.innerHTML = "";
       if (!value.length) {
         target.textContent = "не указано";
         return;
       }
+
+      target.classList.add("tag-row");
       value.forEach((skill) => {
         const tag = document.createElement("span");
         tag.textContent = skill;
@@ -154,38 +203,12 @@ function renderCriteria(criteria) {
       return;
     }
 
-    target.classList.remove("tag-row");
-    target.textContent = value || "не указано";
+    target.textContent = cleanDisplayValue(value, "не указано");
   });
 
   if (confidenceBadge) {
-    confidenceBadge.textContent = "данные backend";
+    confidenceBadge.textContent = "Данные backend";
   }
-}
-
-function renderHeroSummary(criteria = {}, vacancies = []) {
-  const skills = Array.isArray(criteria.skills) ? criteria.skills : [];
-  const role = firstValue(criteria.role) || inferRole(textarea.value) || "Не выбрана";
-  const format = formatSummary(criteria);
-  const fitScore = bestScore(vacancies);
-
-  if (heroRole) {
-    heroRole.textContent = role;
-  }
-  if (heroFormat) {
-    heroFormat.textContent = format;
-  }
-  if (heroFitScore) {
-    heroFitScore.textContent = `${fitScore}%`;
-  }
-  if (heroSkillRow) {
-    const labels = (skills.length ? skills : [role, "Навыки", format]).slice(0, 3);
-    heroSkillRow.querySelectorAll("span").forEach((item, index) => {
-      item.textContent = labels[index] || "—";
-    });
-  }
-
-  updateSignalBars(vacancies);
 }
 
 function renderVacancies(vacancies, requestedTop, sourceLabel) {
@@ -193,75 +216,124 @@ function renderVacancies(vacancies, requestedTop, sourceLabel) {
 
   vacancies.forEach((vacancy) => {
     const card = cardTemplate.content.cloneNode(true);
+    const score = Number(vacancy.score) || 0;
+    const sourceBadge = card.querySelector('[data-field="source"]');
+    const scoreBadge = card.querySelector(".score-badge");
+
     card.querySelector('[data-field="title"]').textContent = vacancy.title;
     card.querySelector('[data-field="company"]').textContent = vacancy.company;
     card.querySelector('[data-field="location"]').textContent = vacancy.location;
     card.querySelector('[data-field="salary"]').textContent = vacancy.salary;
-    card.querySelector('[data-field="score"]').textContent = vacancy.score;
-    card.querySelector('[data-field="source"]').textContent =
-      vacancy.source_label || sourceLabel || getSelectedSourceLabel();
+    card.querySelector('[data-field="score"]').textContent = Math.round(score);
+    sourceBadge.textContent = vacancy.source_label || sourceLabel || getSelectedSourceLabel();
+    sourceBadge.dataset.source = vacancy.source || "";
     card.querySelector('[data-field="why"]').textContent = vacancy.why;
     card.querySelector('[data-field="concern"]').textContent = vacancy.concern;
     card.querySelector('[data-field="next"]').textContent = vacancy.next;
     card.querySelector('[data-field="link"]').href = vacancy.link;
+
+    scoreBadge.classList.toggle("is-high", score >= 80);
+    scoreBadge.classList.toggle("is-medium", score >= 60 && score < 80);
+    scoreBadge.classList.toggle("is-low", score < 60);
     vacancyList.append(card);
   });
 
   if (resultCount) {
     const label = sourceLabel || getSelectedSourceLabel();
-    resultCount.textContent = `${vacancies.length} из ${requestedTop} показано · ${label}`;
+    resultCount.textContent = `${vacancies.length} из ${requestedTop} · ${label}`;
   }
 }
 
-function renderBackendTrace(trace) {
-  const items = normalizeTrace(trace);
-  renderTrace(items, items.length);
+function updateSummary({
+  status = "Ожидание",
+  statusClass = "",
+  score = 0,
+  message = "Запрос еще не выполнен",
+  detail = "После поиска здесь появится краткая сводка результата.",
+  source = getSelectedSourceLabel(),
+  role = "Не определена",
+  city = "Не указан",
+  salary = "Не указана",
+  count = 0,
+  top = getTopLimit(),
+} = {}) {
+  const normalizedScore = Math.max(0, Math.min(100, Math.round(Number(score) || 0)));
+
+  summaryStatus.textContent = status;
+  summaryStatus.className = `summary-status${statusClass ? ` ${statusClass}` : ""}`;
+  summaryScore.textContent = normalizedScore;
+  scoreRing.style.setProperty("--score", normalizedScore);
+  summaryMessage.textContent = message;
+  summaryDetail.textContent = detail;
+  summarySource.textContent = source;
+  summaryRole.textContent = cleanDisplayValue(role, "Не определена");
+  summaryCity.textContent = cleanDisplayValue(city, "Не указан");
+  summarySalary.textContent = cleanDisplayValue(salary, "Не указана");
+  summaryCount.textContent = `${count} из ${top}`;
 }
 
-function normalizeTrace(trace) {
-  if (!Array.isArray(trace) || !trace.length) {
-    return buildLoadingTrace(getSelectedSourceLabel());
-  }
-
-  return trace.slice(0, 12).map((line, index) => {
-    const text = String(line);
-    return {
-      title: traceTitle(text, index),
-      text,
-    };
+function updateSummaryFromResult(criteria, vacancies, sourceLabel, requestedTop) {
+  const score = bestScore(vacancies);
+  updateSummary({
+    status: vacancies.length ? "Готово" : "Нет результатов",
+    statusClass: vacancies.length ? "is-complete" : "is-error",
+    score,
+    message: vacancies.length
+      ? `Найдено ${vacancies.length} подходящих вакансий`
+      : "Строгий фильтр не нашел совпадений",
+    detail: vacancies.length
+      ? `Лучший результат получил fit score ${score} из 100.`
+      : "Измените формулировку, источник или ограничения поиска.",
+    source: sourceLabel || getSelectedSourceLabel(),
+    role: criteria.role,
+    city: criteria.city,
+    salary: criteria.salary,
+    count: vacancies.length,
+    top: requestedTop,
   });
 }
 
-function traceTitle(text, index) {
-  if (text.includes("Criteria")) return "Критерии извлечены";
-  if (text.includes("Trudvsem request")) return "Запрос к Trudvsem";
-  if (text.includes("SuperJob request")) return "Запрос к SuperJob";
-  if (text.includes("Trudvsem returned")) return "Вакансии получены";
-  if (text.includes("SuperJob returned")) return "Вакансии получены";
-  if (text.includes("Validation")) return "Валидация завершена";
-  if (text.includes("Scored")) return "Топ сформирован";
-  if (text.includes("LLM")) return "LLM-шаг";
-  if (text.includes("fallback")) return "Fallback";
-  return index === 0 ? "Pipeline" : "Шаг агента";
+function setPipelineState(stage, label) {
+  const safeStage = Math.max(0, Math.min(4, stage));
+  const progress = safeStage === 0 ? 0 : (safeStage / 4) * 100;
+
+  pipelineBarFill.style.width = `${progress}%`;
+  pipelineLabel.textContent = label;
+  pipelineSteps.forEach((item, index) => {
+    item.classList.toggle("is-complete", index < safeStage);
+    item.classList.toggle("is-active", index === safeStage && safeStage < 4);
+  });
 }
 
-async function runMockSearch(query) {
+async function runSearch(query) {
   const topN = getTopLimit();
   const source = getSelectedSource();
-  const loadingTrace = buildLoadingTrace(getSelectedSourceLabel());
-  hideResults();
-  renderTrace(loadingTrace, 0);
+  const sourceLabel = getSelectedSourceLabel();
+  const loadingTrace = buildLoadingTrace(sourceLabel);
+
+  hideResultPanels();
   loadingPanel.hidden = false;
   setButtonLoading(true);
-  renderHeroSummary({ role: inferRole(query), city: inferCity(query), remote: inferRemote(query) }, []);
+  renderTrace(loadingTrace, 0);
+  traceSummaryText.textContent = "Агент выполняет поиск";
+  updateSummary({
+    status: "Анализ",
+    statusClass: "is-loading",
+    message: "Агент анализирует запрос",
+    detail: "Обычно поиск занимает несколько секунд.",
+    source: sourceLabel,
+    count: 0,
+    top: topN,
+  });
+  setPipelineState(1, "Запрос принят");
 
+  let progressStage = 1;
+  const progressLabels = ["Запрос принят", "Извлекаем критерии", "Ищем вакансии", "Формируем топ"];
   const progressTimer = window.setInterval(() => {
-    const active = Array.from(traceList.querySelectorAll("li")).findIndex((item) =>
-      item.classList.contains("is-active"),
-    );
-    const next = active < 0 ? 1 : Math.min(active + 1, loadingTrace.length - 1);
-    setTraceState(next);
-  }, 900);
+    progressStage = Math.min(progressStage + 1, 3);
+    setTraceState(progressStage);
+    setPipelineState(progressStage, progressLabels[progressStage - 1]);
+  }, 950);
 
   try {
     const response = await fetch(API_ENDPOINT, {
@@ -273,38 +345,52 @@ async function runMockSearch(query) {
     });
 
     const payload = await response.json().catch(() => ({}));
-
     if (!response.ok) {
       throw new Error(payload.message || "Backend API вернул ошибку.");
     }
 
     window.clearInterval(progressTimer);
-    setTraceState(loadingTrace.length);
     loadingPanel.hidden = true;
     setButtonLoading(false);
-
+    setPipelineState(4, "Поиск завершен");
     renderBackendTrace(payload.trace);
     renderCriteria(payload.criteria || {});
 
-    const vacancies = payload.vacancies || [];
+    const vacancies = Array.isArray(payload.vacancies) ? payload.vacancies : [];
+    updateSummaryFromResult(
+      payload.criteria || {},
+      vacancies,
+      payload.source_label,
+      payload.top_n || topN,
+    );
+
     if (!vacancies.length) {
       showError(
         "Вакансии не найдены",
-        "По этому запросу строгий фильтр не нашел подходящих вакансий. Попробуйте другой источник, соседний город или более широкую формулировку роли.",
+        "Строгий фильтр не нашел подходящих вакансий. Попробуйте другой источник, соседний город или более широкую формулировку роли.",
         payload.trace || [],
       );
       return;
     }
 
     renderVacancies(vacancies, payload.top_n || topN, payload.source_label);
-    renderHeroSummary(payload.criteria || {}, vacancies);
-
     criteriaPanel.hidden = false;
     vacanciesPanel.hidden = false;
-    vacanciesPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    criteriaPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     window.clearInterval(progressTimer);
     setButtonLoading(false);
+    setPipelineState(0, "Поиск остановлен");
+    updateSummary({
+      status: "Ошибка",
+      statusClass: "is-error",
+      message: "Не удалось выполнить поиск",
+      detail: "Проверьте, запущен ли backend, и повторите запрос.",
+      source: sourceLabel,
+      count: 0,
+      top: topN,
+    });
+    traceSummaryText.textContent = "Поиск завершился ошибкой";
     showError(
       "Backend недоступен",
       `${error.message} Запустите сервер командой: py server.py`,
@@ -314,27 +400,42 @@ async function runMockSearch(query) {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-
   const query = textarea.value.trim();
 
   if (!query) {
-    resetTrace();
-    showError("Запрос пуст", "Добавьте роль, навыки и желаемый формат работы, чтобы агент начал поиск.");
+    renderTrace(emptyTrace);
+    showError(
+      "Запрос пуст",
+      "Добавьте роль, навыки или желаемый формат работы, чтобы агент начал поиск.",
+    );
     textarea.focus();
     return;
   }
 
-  runMockSearch(query);
+  runSearch(query);
 });
 
-topSlider?.addEventListener("input", () => {
-  if (topValue) {
-    topValue.textContent = getTopLimit();
-  }
+exampleButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    textarea.value = button.dataset.query || "";
+    textarea.focus();
+  });
+});
+
+topSlider.addEventListener("input", () => {
+  const top = getTopLimit();
+  topValue.textContent = top;
+  summaryCount.textContent = `0 из ${top}`;
+});
+
+sourceInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    summarySource.textContent = getSelectedSourceLabel();
+  });
 });
 
 function getTopLimit() {
-  const value = Number.parseInt(topSlider?.value || "5", 10);
+  const value = Number.parseInt(topSlider.value || "5", 10);
   return Math.max(1, Math.min(25, Number.isNaN(value) ? 5 : value));
 }
 
@@ -357,53 +458,20 @@ function bestScore(vacancies) {
   return Math.max(0, Math.min(100, Math.round(Math.max(...scores))));
 }
 
-function updateSignalBars(vacancies) {
-  const scores = vacancies.map((vacancy) => Number(vacancy.score)).filter(Number.isFinite);
-  signalBars.forEach((bar, index) => {
-    const score = scores[index % Math.max(scores.length, 1)] || 18 + index * 8;
-    const height = Math.max(18, Math.min(96, Math.round(score)));
-    bar.style.setProperty("--height", `${height}%`);
-  });
+function cleanDisplayValue(value, fallback) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).join(", ") || fallback;
+  }
+
+  const text = String(value || "").trim();
+  const normalized = text.toLowerCase();
+  if (!text || normalized === "не указано" || normalized === "не указана") {
+    return fallback;
+  }
+  return text;
 }
 
-function formatSummary(criteria) {
-  const city = firstValue(criteria.city);
-  const remote = String(criteria.remote || "").toLowerCase();
-  if (city && remote.includes("да")) return `${city} / удаленно`;
-  if (city) return city;
-  if (remote.includes("да")) return "Удаленно";
-  return "Не указан";
-}
-
-function firstValue(value) {
-  if (Array.isArray(value)) return value[0] || "";
-  return String(value || "").split(",")[0].trim();
-}
-
-function inferRole(query) {
-  const text = query.toLowerCase();
-  if (text.includes("продукт") && text.includes("аналит")) return "Продуктовый аналитик";
-  if (text.includes("data analyst") || text.includes("аналитик данных")) return "Аналитик данных";
-  if (text.includes("backend")) return "Backend";
-  if (text.includes("qa") || text.includes("тестиров")) return "QA";
-  return "";
-}
-
-function inferCity(query) {
-  const text = query.toLowerCase();
-  if (text.includes("моск")) return "Москва";
-  if (text.includes("спб") || text.includes("петербург")) return "Санкт-Петербург";
-  return "";
-}
-
-function inferRemote(query) {
-  const text = query.toLowerCase();
-  if (text.includes("удален") || text.includes("удалён") || text.includes("remote")) return "да";
-  return "";
-}
-
-if (topValue) {
-  topValue.textContent = getTopLimit();
-}
-renderHeroSummary();
-resetTrace();
+topValue.textContent = getTopLimit();
+renderTrace(emptyTrace);
+updateSummary();
+setPipelineState(0, "Готов к запуску");
